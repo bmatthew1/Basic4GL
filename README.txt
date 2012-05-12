@@ -9,7 +9,7 @@ while the Windows version of Basic4GL continued to be improved until 2008.
 Another Windows version which could be compiled from source using MinGW was 
 also in development but it hasn't been updated for some time.
 
-In 2012 it was decided by Josh Koert to start work on a new multiplatform 
+In 2012 it was decided by Josh Koert to start work on a new multi-platform 
 version. He was helped with compilation & library creation by Matthew Webb & 
 James Campbell helped with setting the project up on GitHub. There are 
 currently three people working on this project but we welcome help & code 
