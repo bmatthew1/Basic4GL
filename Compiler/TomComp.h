@@ -11,6 +11,7 @@
 #include "../VM/TomVM.h"
 #include "compParse.h"
 #include "compFunction.h"
+#include "compConstant.h"
 #include <map>
 #include <set>
 
@@ -29,6 +30,7 @@ enum compOpType {
     OT_OPERATOR,
     OT_RETURNBOOLOPERATOR,
     OT_BOOLOPERATOR,
+    OT_LAZYBOOLOPERATOR,
     OT_LBRACKET,
     OT_STOP                         // Forces expression evaluation to stop
 };
@@ -40,13 +42,22 @@ struct compOperator {
                                     // 2 -> Calculate "Reg2 op Reg"     (e.g. "Reg2 - Reg")
     int         m_binding;          // Operator binding. Higher = tighter.
 
-
     compOperator (compOpType type, vmOpCode opCode, int params, int binding)
         : m_type (type), m_opCode (opCode), m_params (params), m_binding (binding) { ; }
     compOperator ()
         : m_type (OT_OPERATOR), m_opCode (OP_NOP), m_params (0), m_binding (0) { ; }
     compOperator (const compOperator& o)
         : m_type (o.m_type), m_opCode (o.m_opCode), m_params (o.m_params), m_binding (o.m_binding) { ; }
+};
+
+struct compStackedOperator {
+    compOperator    m_op;               // Stacked operator
+    int             m_lazyJumpAddr;     // Address of lazy jump op code (for "and" and "or" operations)
+
+    compStackedOperator(const compOperator& o)
+        : m_op(o), m_lazyJumpAddr(-1) { ; }
+    compStackedOperator(const compOperator& o, int lazyJumpAddr)
+        : m_op(o), m_lazyJumpAddr(lazyJumpAddr) { ; }
 };
 
 // CompLabel
@@ -59,6 +70,11 @@ struct compLabel {
         : m_offset (offset), m_programDataOffset (dataOffset) { ; }
     compLabel ()
         : m_offset (0), m_programDataOffset (0) { ; }
+
+#ifdef VM_STATE_STREAMING
+    void StreamOut(std::ostream& stream);
+    void StreamIn(std::istream& stream);
+#endif
 };
 
 // compJump
@@ -73,6 +89,19 @@ struct compJump {
         : m_jumpInstruction (instruction), m_labelName (labelName) { ; }
     compJump ()
         : m_jumpInstruction (0), m_labelName ("") { ; }
+};
+
+// compInstructionPos
+// Marks a position within a source file
+struct compInstructionPos {
+    int m_sourceLine, m_sourceCol;
+
+    compInstructionPos() :
+        m_sourceLine(0),
+        m_sourceCol(0) {}
+    compInstructionPos(int line, int col) :
+        m_sourceLine(line),
+        m_sourceCol(col) {}
 };
 
 // compFlowControl
@@ -90,7 +119,7 @@ struct compFlowControl {
     compFlowControlType m_type;                         // Type of flow control construct
     int                 m_jumpOut;                      // Index of instruction that jumps past (out) of flow control construct
     int                 m_jumpLoop;                     // Instruction to jump to to loop
-    int                 m_sourceLine, m_sourceCol;      // Source offset for error reporting
+    compInstructionPos  m_sourcePos;
     std::string         m_data;                         // Misc data
     bool                m_impliedEndif;                 // If/elseif/else only. True if there is an implied endif after the explict endif
     bool                m_blockIf;                      // True if is a block if. Block ifs require "endifs". Non-block ifs have an implicit endif at the end of the line
@@ -99,8 +128,7 @@ struct compFlowControl {
         :   m_type (type),
             m_jumpOut (jumpOut),
             m_jumpLoop (jumpLoop),
-            m_sourceLine (line),
-            m_sourceCol (col),
+            m_sourcePos(line, col),
             m_impliedEndif (impliedEndif),
             m_data (data),
             m_blockIf (blockIf) { ; }
@@ -108,57 +136,8 @@ struct compFlowControl {
         :   m_type ((compFlowControlType) 0),
             m_jumpOut (0),
             m_jumpLoop (0),
-            m_sourceLine (0),
-            m_sourceCol (0),
             m_impliedEndif (false),
             m_data ("") { ; }
-};
-
-// compConstant
-//
-// Recognised constants (e.g. "true", "false")
-
-struct compConstant {
-    vmBasicValType  m_valType;          // Value type
-    vmInt           m_intVal;           // Value
-    vmReal          m_realVal;
-    vmString        m_stringVal;
-
-    compConstant ()
-        :   m_valType (VTP_STRING),
-            m_stringVal (""),
-            m_intVal (0),
-            m_realVal (0) { ; }
-    compConstant (const std::string& s)
-        :   m_valType (VTP_STRING),
-            m_stringVal (s),
-            m_intVal (0),
-            m_realVal (0) { ; }
-    compConstant (int i)
-        :   m_valType (VTP_INT),
-            m_intVal (i),
-            m_stringVal (""),
-            m_realVal (0) { ; }
-    compConstant (unsigned int i)
-        :   m_valType (VTP_INT),
-            m_intVal (i),
-            m_stringVal (""),
-            m_realVal (0) { ; }
-    compConstant (float r)
-        :   m_valType (VTP_REAL),
-            m_realVal (r),
-            m_stringVal (""),
-            m_intVal (0) { ; }
-    compConstant (double r)
-        :   m_valType (VTP_REAL),
-            m_realVal (r),
-            m_stringVal (""),
-            m_intVal (0) { ; }
-    compConstant (const compConstant& c)
-        :   m_valType (c.m_valType),
-            m_realVal (c.m_realVal),
-            m_intVal (c.m_intVal),
-            m_stringVal (c.m_stringVal) { ; }
 };
 
 // Language extension: Operator overloading
@@ -180,9 +159,7 @@ typedef std::map<std::string,compOperator> compOperatorMap;
 typedef std::set<std::string> compStringSet;
 typedef std::map<std::string,compLabel> compLabelMap;
 typedef std::map<unsigned int,std::string> compLabelIndex;          // Index offset to label
-typedef std::map<std::string,compConstant> compConstantMap;
 typedef std::vector<compFuncSpec> compFuncSpecArray;
-typedef std::map<std::string,int> compStringIndex;
 typedef std::multimap<std::string,int> compFuncIndex;
 
 // Misc
@@ -198,6 +175,45 @@ enum compLanguageSyntax {
     LS_TRADITIONAL_PRINT    = 2     // Traditional mode PRINT, but otherwise standard Basic4GL syntax
 };
 
+/// A runtime function
+struct compRuntimeFunction {
+    int prototypeIndex;
+
+    compRuntimeFunction() : prototypeIndex(-1) {}
+    compRuntimeFunction(int _prototypeIndex) : prototypeIndex(_prototypeIndex) {}
+
+    // State streaming
+#ifdef VM_STATE_STREAMING
+    void StreamOut(std::ostream& stream);
+    void StreamIn(std::istream& stream);
+#endif
+};
+
+enum compUserFunctionType {
+    UFT_IMPLEMENTATION,
+    UFT_FWDDECLARATION,
+    UFT_RUNTIMEDECLARATION
+};
+
+////////////////////////////////////////////////////////////////////////////////
+//  compRollbackPoint
+//
+/// Allows the compiler to rollback cleanly if an error occurs during
+/// compilation. Used during runtime compilation to ensure the compiler does
+/// not leave the VM in an unstable state.
+///
+/// Note: Currently not everything is rolled back, just enough to keep the VM
+/// stable. There may still be resources used (such as code instructions
+/// allocated), but they should be benign and unreachable.
+struct compRollbackPoint {
+
+    // Virtual machine rollback
+    vmRollbackPoint vmRollback;
+
+    // Runtime functions
+    int runtimeFunctionCount;
+};
+
 ////////////////////////////////////////////////////////////////////////////////
 // TomBasicCompiler
 //
@@ -206,38 +222,51 @@ enum compLanguageSyntax {
 class TomBasicCompiler : public HasErrorState {
 
     // Virtual machine
-    TomVM&                  m_vm;
+    TomVM&                          m_vm;
 
     // Parser
-    compParser              m_parser;
+    compParser                      m_parser;
+
 
     // Settings
-    bool                    m_caseSensitive;
-    compOperatorMap         m_unaryOperators;       // Recognised operators. Unary have one operand (e.g NOT x)
-    compOperatorMap         m_binaryOperators;      // Binary have to (e.g. x + y)
-    compStringSet           m_reservedWords;
-    compConstantMap         m_constants;            // Permanent constants.
-    compConstantMap         m_programConstants;     // Constants declared using the const command.
-    compFuncSpecArray       m_functions;
-    compFuncIndex           m_functionIndex;        // Maps function name to index of function (in m_functions array)
-    compLanguageSyntax      m_syntax;
+    bool                            m_caseSensitive;
+    compOperatorMap                 m_unaryOperators;       // Recognised operators. Unary have one operand (e.g NOT x)
+    compOperatorMap                 m_binaryOperators;      // Binary have to (e.g. x + y)
+    compStringSet                   m_reservedWords;
+    compConstantMap                 m_constants;            // Permanent constants.
+    compConstantMap                 m_programConstants;     // Constants declared using the const command.
+    compFuncSpecArray               m_functions;
+    compFuncIndex                   m_functionIndex;        // Maps function name to index of function (in m_functions array)
+    compLanguageSyntax              m_syntax;
+    std::string                     m_symbolPrefix;         // Prefix all symbols with this text
 
     // Compiler state
-    vmValType                       m_regType, m_reg2Type;
-    std::vector<vmValType>          m_operandStack;
-    std::vector<compOperator>       m_operatorStack;
-    compOperator& OperatorTOS () { return m_operatorStack [m_operatorStack.size () - 1]; }
-    compLabelMap                    m_labels;
-    compLabelIndex                  m_labelIndex;
-    std::vector<compJump>           m_jumps;        // Jumps to fix up
-    std::vector<compJump>           m_resets;       // Resets to fix up
-    std::vector<compFlowControl>    m_flowControl;  // Flow control structure stack
-    compToken                       m_token;
-    bool                            m_needColon;    // True if next instruction must be separated by a colon (or newline)
-    bool                            m_freeTempData; // True if need to generate code to free temporary data before the next instruction
-    unsigned int                    m_lastLine,
-                                    m_lastCol;
-
+    vmValType                           m_regType, m_reg2Type;
+    std::vector<vmValType>              m_operandStack;
+    std::vector<compStackedOperator>    m_operatorStack;
+    compStackedOperator& OperatorTOS () { return m_operatorStack [m_operatorStack.size () - 1]; }
+    compLabelMap                        m_labels;
+    compLabelIndex                      m_labelIndex;
+    std::vector<compJump>               m_jumps;                // Jumps to fix up
+    std::vector<compJump>               m_resets;               // Resets to fix up
+    std::vector<compFlowControl>        m_flowControl;          // Flow control structure stack
+    compToken                           m_token;
+    bool                                m_needColon;            // True if next instruction must be separated by a colon (or newline)
+    bool                                m_freeTempData;         // True if need to generate code to free temporary data before the next instruction
+    unsigned int                        m_lastLine,
+                                        m_lastCol;
+    bool                                m_inFunction;
+    compInstructionPos                  m_functionStart;
+    int                                 m_functionJumpOver;
+    std::map<std::string,int>           m_globalUserFunctionIndex;  // Maps function name to index of function
+    std::map<std::string,int>           m_localUserFunctionIndex;   // Local user function index (for the current code block being compiled)
+    std::map<std::string,int>           m_visibleUserFunctionIndex; // Combines local and global (where a local function overrides a global one of the same name)
+    std::map<int,std::string>           m_userFunctionReverseIndex; // Index->Name lookup. For debug views.
+    int                                 m_currentFunction;          // Index of current active user function. Usually this will be the last in the vm.UserFunctions() vector,
+                                                                    // can be different in special cases (e.g. when compiler is called from debugger to evaluate an expression).
+    vmUserFuncPrototype                 m_userFuncPrototype;        // Prototype of function being declared.
+    std::vector<compRuntimeFunction>    m_runtimeFunctions;
+    std::map<std::string,int>           m_runtimeFunctionIndex;
 
     void ClearState ();
     bool GetToken (bool skipEOL = false, bool dataMode = false);
@@ -250,8 +279,11 @@ class TomBasicCompiler : public HasErrorState {
     bool SkipSeparators         ();
     bool CompileInstruction     ();
     bool CompileStructure       ();
-    bool CompileDim             (bool forStruc);
-    bool CompileDimField        (std::string& name, vmValType& type, bool forStruc);
+    bool CompileDim             (bool forStruc, bool forFuncParam);
+    bool CompileTokenName       (std::string& name, compTokenType& tokenType, bool allowSuffix);
+    bool CompileDataType        (std::string& name, vmValType& type, compTokenType& tokenType);
+    bool CompileDimField        (std::string& name, vmValType& type, bool forStruc, bool forFuncParam);
+    bool CompileAs              (std::string& name, vmValType& type);
     bool CompileLoadVar         ();
     bool CompileDeref           ();
     bool CompileDerefs          ();
@@ -265,6 +297,7 @@ class TomBasicCompiler : public HasErrorState {
     bool CompileConvert2        (vmValType type);
     bool CompileTakeAddress     ();
     bool CompileAssignment      ();
+    bool InternalCompileAssignment();
     bool CompileLoad            ();
     bool CompileExpressionLoad  (bool mustBeConstant = false);
     bool CompileLoadConst       ();
@@ -292,6 +325,20 @@ class TomBasicCompiler : public HasErrorState {
     bool CompilePrint           (bool forceNewLine);
     bool CompileInput           ();
     bool CompileLanguage        ();
+    bool CompileUserFunctionFwdDecl();
+    bool CompileUserFunctionRuntimeDecl();
+    bool CompileUserFunction    (compUserFunctionType funcType);
+    bool CompileEndUserFunction (bool hasReturnVal);
+    bool CheckUnclosedFlowControl();
+    bool CheckUnclosedUserFunction();
+    bool CompileUserFunctionCall(bool mustReturnValue, bool isRuntimeFunc);
+    bool CompileUserFuncParam(vmUserFuncPrototype& prototype, int i);
+    bool CompileReturn          ();
+    bool CompileNull            ();
+    bool InternalCompileBindCode();
+    bool CompileBindCode        ();
+    bool CompileExec            ();
+    bool CheckFwdDeclFunctions  ();
 
     bool EvaluateConstantExpression (vmBasicValType& type, vmValue& result, std::string& stringResult);
     bool CompileConstantExpression (vmBasicValType type = VTP_UNDEFINED);
@@ -326,20 +373,37 @@ class TomBasicCompiler : public HasErrorState {
     void RestorePos (compParserPos& pos);
     compFuncSpec *FindFunction(std::string name, int paramCount);
     bool NeedAutoEndif();
+    vmUserFunc& _UserFunc() {
+        // Return function currently being declared
+        assert(m_vm.UserFunctions().size() > 0);
+        assert(m_currentFunction >= 0);
+        assert((unsigned)m_currentFunction < m_vm.UserFunctions().size());
+        return m_vm.UserFunctions()[m_currentFunction];
+    }
+    vmUserFuncPrototype& UserPrototype() {
+        // Return prototype of function currently being declared
+        assert(m_vm.UserFunctionPrototypes().size() > 0);
+        assert(_UserFunc().prototypeIndex >= 0);
+        assert((unsigned)_UserFunc().prototypeIndex < m_vm.UserFunctionPrototypes().size());
+        return m_vm.UserFunctionPrototypes()[_UserFunc().prototypeIndex];
+    }
 
 public:
 
     TomBasicCompiler (TomVM& vm, bool caseSensitive = false);
 
-    TomVM&          VM ()           { return m_vm; }
-    compParser&     Parser ()       { return m_parser; }
-    bool            CaseSensitive (){ return m_caseSensitive; }
+    TomVM&              VM ()           { return m_vm; }
+    compParser&         Parser ()       { return m_parser; }
+    bool                CaseSensitive (){ return m_caseSensitive; }
 
-    bool Compile ();
+    void New();
+    bool Compile();
+    bool CompileOntoEnd();
 
     ////////////
     // Settings
     compLanguageSyntax Syntax() { return m_syntax; }
+    std::string& SymbolPrefix() { return m_symbolPrefix; }
 
     //////////////////////
     // Language extension
@@ -354,10 +418,23 @@ public:
     compConstantMap& Constants () { return m_constants; }
 
     // Functions
-    bool IsFunction (std::string& name) {
+    bool IsBuiltinFunction(std::string& name) {
         compFuncIndex::iterator i = m_functionIndex.find (LowerCase (name));
         return i != m_functionIndex.end () && (*i).first == LowerCase (name);
     }
+    bool IsUserFunction(std::string& name) {
+        return m_visibleUserFunctionIndex.find(LowerCase(name)) != m_visibleUserFunctionIndex.end();
+    }
+    bool IsLocalUserFunction(std::string& name) {
+        return m_localUserFunctionIndex.find(LowerCase(name)) != m_localUserFunctionIndex.end();
+    }
+    bool IsGlobalUserFunction(std::string& name) {
+        return m_globalUserFunctionIndex.find(LowerCase(name)) != m_globalUserFunctionIndex.end();
+    }
+    bool IsRuntimeFunction(std::string& name) {
+        return m_runtimeFunctionIndex.find(LowerCase(name)) != m_runtimeFunctionIndex.end();
+    }
+    bool IsFunction(std::string& name);
     void AddFunction (  std::string         name,
                         vmFunction          func,
                         compParamTypeList   params,
@@ -365,7 +442,8 @@ public:
                         bool                isFunction,
                         vmValType           returnType,
                         bool                timeshare = false,
-                        bool                freeTempData = false);
+                        bool                freeTempData = false,
+                        compParamValidationCallback paramValidationCallback = NULL);
     std::string FunctionName (int index);           // Find function name for function #. Used for debug reporting
     compFuncSpecArray& Functions ()     { return m_functions; }
     compFuncIndex& FunctionIndex ()     { return m_functionIndex; }
@@ -380,8 +458,14 @@ public:
         return si != m_reservedWords.end ();
     }
     bool IsConstant (std::string& text) {
-        compConstantMap::iterator si = m_constants.find (text);
-        return si != m_constants.end ();
+
+        // Check built in constants
+        if (m_constants.find (text) != m_constants.end())
+            return true;
+
+        // Check DLL constants
+        compConstantMap::const_iterator itor;
+        return false;
     }
     bool IsBinaryOperator (std::string& text) {
         compOperatorMap::iterator si = m_binaryOperators.find (text);
@@ -395,9 +479,25 @@ public:
     unsigned int Line () { return m_token.m_line; }
     unsigned int Col  () { return m_token.m_col; }
 
+    // Compiler rollback
+    compRollbackPoint GetRollbackPoint();
+    void Rollback(compRollbackPoint rollbackPoint);
+
     // Debugging
     std::string DescribeStackCall (unsigned int returnAddr);
-    bool TempCompileExpression (std::string expression, vmValType& valType);
+    bool TempCompileExpression (
+        std::string expression,
+        vmValType& valType,
+        bool inFunction,
+        int currentFunction);
+    std::string GetUserFunctionName(int index);
+
+
+    // State streaming
+#ifdef VM_STATE_STREAMING
+    void StreamOut(std::ostream& stream);
+    bool StreamIn(std::istream& stream);
+#endif
 };
 
 #endif

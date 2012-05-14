@@ -30,6 +30,9 @@ inline void WriteShort (std::ostream& stream, short s) {
 inline void WriteByte (std::ostream& stream, byte b) {
     stream.write ((char *) &b, sizeof (b));
 }
+inline void WriteFloat(std::ostream& stream, float f) {
+    stream.write((char *) &f, sizeof(f));
+}
 inline long ReadLong (std::istream& stream) {
     long l;
     stream.read ((char *) &l, sizeof (l));
@@ -44,6 +47,11 @@ inline byte ReadByte (std::istream& stream) {
     byte b;
     stream.read ((char *) &b, sizeof (b));
     return b;
+}
+inline float ReadFloat(std::istream& stream) {
+    float f;
+    stream.read((char *) &f, sizeof(f));
+    return f;
 }
 inline void WriteString (std::ostream& stream, std::string& s) {
     WriteLong (stream, s.length ());

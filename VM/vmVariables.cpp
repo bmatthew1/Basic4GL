@@ -47,7 +47,7 @@ void vmVariable::StreamIn (std::istream& stream) {
 // vmVariables
 int vmVariables::GetVar (std::string name) {
     name = LowerCase (name);
-    for (int i = 0; i < m_variables.size (); i++)
+    for (unsigned int i = 0; i < m_variables.size (); i++)
         if (m_variables [i].m_name == name)
             return i;
     return -1;

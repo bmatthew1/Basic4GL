@@ -16,6 +16,7 @@
 inline char tolower (char c) { return std::tolower (c); }
 inline char toupper (char c) { return std::toupper (c); }
 
+                     
 #pragma warning( disable : W8026 )
 
 

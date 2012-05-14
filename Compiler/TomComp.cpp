@@ -14,10 +14,60 @@
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////
+//  compLabel
+#ifdef VM_STATE_STREAMING
+void compLabel::StreamOut(std::ostream& stream) {
+    WriteLong(stream, m_offset);
+    WriteLong(stream, m_programDataOffset);
+}
+
+void compLabel::StreamIn(std::istream& stream) {
+    m_offset = ReadLong(stream);
+    m_programDataOffset = ReadLong(stream);
+}
+#endif
+
+////////////////////////////////////////////////////////////////////////////////
+//  compConstant
+#ifdef VM_STATE_STREAMING
+void compConstant::StreamOut(std::ostream& stream) {
+    WriteLong(stream, (int) m_valType);
+    switch(m_valType) {
+        case VTP_INT:       WriteLong(stream, m_intVal);        break;
+        case VTP_REAL:      WriteFloat(stream, m_realVal);      break;
+        case VTP_STRING:    WriteString(stream, m_stringVal);   break;
+    }
+}
+
+void compConstant::StreamIn(std::istream& stream) {
+    m_valType = (vmBasicValType) ReadLong(stream);
+    switch(m_valType) {
+        case VTP_INT:       m_intVal    = ReadLong(stream);     break;
+        case VTP_REAL:      m_realVal   = ReadFloat(stream);    break;
+        case VTP_STRING:    m_stringVal = ReadString(stream);   break;
+    }
+}
+#endif
+
+////////////////////////////////////////////////////////////////////////////////
+// compRuntimeFunction
+
+#ifdef VM_STATE_STREAMING
+void compRuntimeFunction::StreamOut(std::ostream& stream) {
+    WriteLong(stream, prototypeIndex);
+}
+
+void compRuntimeFunction::StreamIn(std::istream& stream) {
+    prototypeIndex = ReadLong(stream);
+}
+#endif
+
+
+////////////////////////////////////////////////////////////////////////////////
 // TomBasicCompiler
 
 TomBasicCompiler::TomBasicCompiler (TomVM& vm, bool caseSensitive)
-         : m_vm (vm), m_caseSensitive (caseSensitive), m_syntax(LS_BASIC4GL) {
+         : m_vm(vm), m_caseSensitive (caseSensitive), m_syntax(LS_BASIC4GL) {
     ClearState ();
 
     // Setup operators
@@ -26,6 +76,8 @@ TomBasicCompiler::TomBasicCompiler (TomVM& vm, bool caseSensitive)
     m_binaryOperators   ["xor"] = compOperator (OT_BOOLOPERATOR, OP_OP_XOR, 2,               10);
     m_binaryOperators   ["or"]  = compOperator (OT_BOOLOPERATOR, OP_OP_OR, 2,                11);
     m_binaryOperators   ["and"] = compOperator (OT_BOOLOPERATOR, OP_OP_AND, 2,               12);
+    m_binaryOperators   ["lor"]  = compOperator (OT_LAZYBOOLOPERATOR, OP_OP_OR, 2,                11);
+    m_binaryOperators   ["land"] = compOperator (OT_LAZYBOOLOPERATOR, OP_OP_AND, 2,               12);
     m_unaryOperators    ["not"] = compOperator (OT_BOOLOPERATOR, OP_OP_NOT, 1,               20);
     m_binaryOperators   ["="]   = compOperator (OT_RETURNBOOLOPERATOR, OP_OP_EQUAL, 2,             30);
     m_binaryOperators   ["<>"]  = compOperator (OT_RETURNBOOLOPERATOR, OP_OP_NOT_EQUAL, 2,         30);
@@ -42,45 +94,53 @@ TomBasicCompiler::TomBasicCompiler (TomVM& vm, bool caseSensitive)
 
 
     // Setup reserved words
-    m_reservedWords.insert ("dim");
-    m_reservedWords.insert ("goto");
-    m_reservedWords.insert ("if");
-    m_reservedWords.insert ("then");
-    m_reservedWords.insert ("elseif");
-    m_reservedWords.insert ("else");
-    m_reservedWords.insert ("endif");
-    m_reservedWords.insert ("end");
-    m_reservedWords.insert ("gosub");
-    m_reservedWords.insert ("return");
-    m_reservedWords.insert ("for");
-    m_reservedWords.insert ("to");
-    m_reservedWords.insert ("step");
-    m_reservedWords.insert ("next");
-    m_reservedWords.insert ("while");
-    m_reservedWords.insert ("wend");
-    m_reservedWords.insert ("run");
-    m_reservedWords.insert ("struc");
-    m_reservedWords.insert ("endstruc");
-    m_reservedWords.insert ("const");
-    m_reservedWords.insert ("alloc");
-    m_reservedWords.insert ("null");
-    m_reservedWords.insert ("data");
-    m_reservedWords.insert ("read");
-    m_reservedWords.insert ("reset");
-    m_reservedWords.insert ("type");        // QBasic/Freebasic compatibility
-    m_reservedWords.insert ("as");          //
-    m_reservedWords.insert ("integer");     //
-    m_reservedWords.insert ("single");      //
-    m_reservedWords.insert ("double");      //
-    m_reservedWords.insert ("string");      //
-    m_reservedWords.insert ("language");    // Language syntax
-    m_reservedWords.insert ("traditional");
-    m_reservedWords.insert ("basic4gl");
-    m_reservedWords.insert ("traditional_print");
-    m_reservedWords.insert ("input");
-    m_reservedWords.insert ("do");
-    m_reservedWords.insert ("loop");
-    m_reservedWords.insert ("until");
+    m_reservedWords.insert("dim");
+    m_reservedWords.insert("goto");
+    m_reservedWords.insert("if");
+    m_reservedWords.insert("then");
+    m_reservedWords.insert("elseif");
+    m_reservedWords.insert("else");
+    m_reservedWords.insert("endif");
+    m_reservedWords.insert("end");
+    m_reservedWords.insert("gosub");
+    m_reservedWords.insert("return");
+    m_reservedWords.insert("for");
+    m_reservedWords.insert("to");
+    m_reservedWords.insert("step");
+    m_reservedWords.insert("next");
+    m_reservedWords.insert("while");
+    m_reservedWords.insert("wend");
+    m_reservedWords.insert("run");
+    m_reservedWords.insert("struc");
+    m_reservedWords.insert("endstruc");
+    m_reservedWords.insert("const");
+    m_reservedWords.insert("alloc");
+    m_reservedWords.insert("null");
+    m_reservedWords.insert("data");
+    m_reservedWords.insert("read");
+    m_reservedWords.insert("reset");
+    m_reservedWords.insert("type");        // QBasic/Freebasic compatibility
+    m_reservedWords.insert("as");          //
+    m_reservedWords.insert("integer");     //
+    m_reservedWords.insert("single");      //
+    m_reservedWords.insert("double");      //
+    m_reservedWords.insert("string");      //
+    m_reservedWords.insert("language");    // Language syntax
+    m_reservedWords.insert("traditional");
+    m_reservedWords.insert("basic4gl");
+    m_reservedWords.insert("traditional_print");
+    m_reservedWords.insert("input");
+    m_reservedWords.insert("do");
+    m_reservedWords.insert("loop");
+    m_reservedWords.insert("until");
+    m_reservedWords.insert("function");
+    m_reservedWords.insert("sub");
+    m_reservedWords.insert("endfunction");
+    m_reservedWords.insert("endsub");
+    m_reservedWords.insert("declare");
+    m_reservedWords.insert("runtime");
+    m_reservedWords.insert("bindcode");
+    m_reservedWords.insert("exec");
 }
 
 void TomBasicCompiler::ClearState () {
@@ -93,24 +153,55 @@ void TomBasicCompiler::ClearState () {
     m_resets.clear ();
     m_flowControl.clear ();
     m_syntax = LS_BASIC4GL;
+    m_inFunction = false;
+
+    // No local user functions defined initially.
+    // Visible functions are the global functions.
+    m_localUserFunctionIndex.clear();
+    m_visibleUserFunctionIndex = m_globalUserFunctionIndex;
 }
 
-bool TomBasicCompiler::Compile () {
+void TomBasicCompiler::New() {
 
     // Clear existing program
     m_vm.New ();
     m_lastLine = 0;
     m_lastCol  = 0;
 
-    // Compile source code
+    // Clear state
+    m_globalUserFunctionIndex.clear();
+    m_userFunctionReverseIndex.clear();
+    m_runtimeFunctionIndex.clear();
     ClearState ();
     m_parser.Reset ();
     m_programConstants.clear ();
     m_labels.clear ();
     m_labelIndex.clear ();
+    m_currentFunction = -1;
+    m_runtimeFunctions.clear();
+}
+
+bool TomBasicCompiler::Compile () {
+
+    // Clear existing program
+    New();
+
+    // Compile source code
     InternalCompile ();
 
     return !Error ();
+}
+
+bool TomBasicCompiler::CompileOntoEnd() {
+
+    // Compile code and append to end of program.
+    // Like ::Compile(), but does not clear out the existing program first.
+    ClearState();
+    m_lastLine = 0;
+    m_lastCol  = 0;
+    m_parser.Reset();
+    InternalCompile();
+    return !Error();
 }
 
 bool TomBasicCompiler::CheckParser () {
@@ -147,13 +238,19 @@ bool TomBasicCompiler::GetToken (bool skipEOL, bool dataMode) {
         else if (IsFunction (m_token.m_text))
             m_token.m_type = CTT_FUNCTION;
 
+        else if (IsUserFunction(m_token.m_text))
+            m_token.m_type = CTT_USER_FUNCTION;
+
+        else if (IsRuntimeFunction(m_token.m_text))
+            m_token.m_type = CTT_RUNTIME_FUNCTION;
+
         else {
 
             // Match against constants
 
             // Try permanent constants first
             bool isConstant;
-            compConstantMap::iterator smi = m_constants.find (m_token.m_text);
+            compConstantMap::const_iterator smi = m_constants.find (m_token.m_text);
             isConstant = smi != m_constants.end ();
 
             // Otherwise try program constants
@@ -205,7 +302,14 @@ bool TomBasicCompiler::NeedAutoEndif() {
     return (top.m_type == FCT_IF || top.m_type == FCT_ELSE) && !top.m_blockIf;
 }
 
+bool TomBasicCompiler::IsFunction(std::string& name) {
+    return IsBuiltinFunction(name);
+}
+
 void TomBasicCompiler::InternalCompile () {
+
+    // Allocate a new code block
+    m_vm.NewCodeBlock();
 
     // Clear error state
     ClearError ();
@@ -268,8 +372,18 @@ void TomBasicCompiler::InternalCompile () {
             instr.m_value.IntVal () = Label ((*i).m_labelName).m_programDataOffset;
         }
 
-        // Check for open flow control structures
-        if (!m_flowControl.empty ()) {
+        // Check for open function or flow control structures
+        if (!CheckUnclosedUserFunction())
+            return;
+
+        if (!CheckUnclosedFlowControl())
+            return;
+
+        // Check for not implemented forward declared functions
+        if (!CheckFwdDeclFunctions())
+            return;
+
+/*        if (!m_flowControl.empty ()) {
 
             // Find topmost structure
             compFlowControl top = FlowControlTOS ();
@@ -290,8 +404,69 @@ void TomBasicCompiler::InternalCompile () {
             }
 
             return;
+        }    */
+    }
+}
+
+bool TomBasicCompiler::CheckUnclosedUserFunction() {
+    if (m_inFunction) {
+
+        // Point parser to function
+        m_parser.SetPos(m_functionStart.m_sourceLine, m_functionStart.m_sourceCol);
+
+        // Return error
+        if (UserPrototype().hasReturnVal)
+            SetError("'function' without 'endfunction'");
+        else
+            SetError("'sub' without 'endsub'");
+        return false;
+    }
+    else
+        return true;
+}
+
+bool TomBasicCompiler::CheckUnclosedFlowControl() {
+
+    // Check for open flow control structures
+    if (!m_flowControl.empty ()) {
+
+        // Find topmost structure
+        compFlowControl top = FlowControlTOS ();
+
+        // Point parser to it
+        m_parser.SetPos (top.m_sourcePos.m_sourceLine, top.m_sourcePos.m_sourceCol);
+
+        // Set error message
+        switch (FlowControlTOS ().m_type) {
+        case FCT_IF:    SetError ("'if' without 'endif'");          break;
+        case FCT_ELSE:  SetError ("'else' without 'endif'");        break;
+        case FCT_FOR:   SetError ("'for' without 'next'");          break;
+        case FCT_WHILE: SetError ("'while' without 'wend'");        break;
+        case FCT_DO_PRE:
+        case FCT_DO_POST:
+                        SetError ("'do' without 'loop'");           break;
+        default:        SetError ("Open flow control structure");   break;
+        }
+
+        return false;
+    }
+    else
+        return true;
+}
+
+bool TomBasicCompiler::CheckFwdDeclFunctions() {
+
+    // Look for function that is declared, but not yet implemented
+    for (   std::map<std::string,int>::iterator i = m_localUserFunctionIndex.begin();
+            i != m_localUserFunctionIndex.end();
+            i++) {
+        if (!m_vm.UserFunctions()[i->second].implemented) {
+            SetError((std::string)"Function/sub '" + i->first + "' was DECLAREd, but not implemented");
+            return false;
         }
     }
+
+    return true;
 }
 
 void TomBasicCompiler::AddInstruction (vmOpCode opCode, vmBasicValType type, const vmValue& val) {
@@ -320,15 +495,23 @@ bool TomBasicCompiler::CompileInstruction () {
     if (    m_token.m_newLine && m_token.m_type == CTT_TEXT
         &&  nextToken.m_text == ":") {
 
+        // Labels cannot exist inside subs/functions
+        if (m_inFunction) {
+            SetError((std::string)"You cannot use a label inside a function or subroutine");
+            return false;
+        }
+
         // Label declaration
+        std::string labelName = m_symbolPrefix + m_token.m_text;
+        
         // Must not already exist
-        if (LabelExists (m_token.m_text)) {
-            SetError ("Duplicate label name: " + m_token.m_text);
+        if (LabelExists (labelName)) {
+            SetError ("Duplicate label name: " + labelName);
             return false;
         }
 
         // Create new label
-        AddLabel (m_token.m_text, compLabel (m_vm.InstructionCount (), m_vm.ProgramData ().size ()));
+        AddLabel (labelName, compLabel (m_vm.InstructionCount (), m_vm.ProgramData ().size ()));
 
         // Skip label
         if (!GetToken ())
@@ -340,7 +523,7 @@ bool TomBasicCompiler::CompileInstruction () {
             return false;
     }
     else if (m_token.m_text == "dim") {
-        if (!CompileDim (false))
+        if (!CompileDim (false, false))
             return false;
     }
     else if (m_token.m_text == "goto") {
@@ -356,9 +539,8 @@ bool TomBasicCompiler::CompileInstruction () {
             return false;
     }
     else if (m_token.m_text == "return") {
-        if (!GetToken ())
+        if (!CompileReturn())
             return false;
-        AddInstruction (OP_RETURN, VTP_INT, vmValue ());
     }
     else if (m_token.m_text == "if") {
         if (!CompileIf (false))
@@ -409,6 +591,15 @@ bool TomBasicCompiler::CompileInstruction () {
             if (!CompileEndIf (false))
                 return false;
         }
+        // Special case! "End" immediately followed by "function" is syntactically equivalent to "endfunction"
+        else if (m_token.m_text == "function") {
+            if (!CompileEndUserFunction(true))
+                return false;
+        }
+        else if (m_token.m_text == "sub") {
+            if (!CompileEndUserFunction(false))
+                return false;
+        }
         else
             // Otherwise is "End" program instruction
             AddInstruction (OP_END, VTP_INT, vmValue ());
@@ -454,8 +645,44 @@ bool TomBasicCompiler::CompileInstruction () {
         if (!CompileLanguage())
             return false;
     }
+    else if (m_token.m_text == "function" || m_token.m_text == "sub") {
+        if (!CompileUserFunction(UFT_IMPLEMENTATION))
+            return false;
+    }
+    else if (m_token.m_text == "endfunction") {
+        if (!CompileEndUserFunction(true))
+            return false;
+    }
+    else if (m_token.m_text == "endsub") {
+        if (!CompileEndUserFunction(false))
+            return false;
+    }
+    else if (m_token.m_text == "declare") {
+        if (!CompileUserFunctionFwdDecl())
+            return false;
+    }
+    else if (m_token.m_text == "runtime") {
+        if (!CompileUserFunctionRuntimeDecl())
+            return false;
+    }
+    else if (m_token.m_text == "bindcode") {
+        if (!CompileBindCode())
+            return false;
+    }
+    else if (m_token.m_text == "exec") {
+        if (!CompileExec())
+            return false;
+    }
     else if (m_token.m_type == CTT_FUNCTION) {
         if (!CompileFunction ())
+            return false;
+    }
+    else if (m_token.m_type == CTT_USER_FUNCTION) {
+        if (!CompileUserFunctionCall(false, false))
+            return false;
+    }
+    else if (m_token.m_type == CTT_RUNTIME_FUNCTION) {
+        if (!CompileUserFunctionCall(false, true))
             return false;
     }
     else if (!CompileAssignment ())
@@ -536,12 +763,22 @@ bool TomBasicCompiler::CompileStructure () {
     if (!GetToken ())
         return false;
 
+    // Check that we are not already inside a function
+    if (m_inFunction) {
+        SetError("Cannot define a structure inside a function or subroutine");
+        return false;
+    }
+
+    // Check that we are not inside a control structure
+    if (!CheckUnclosedFlowControl())
+        return false;
+
     // Expect structure name
     if (m_token.m_type != CTT_TEXT) {
         SetError ("Expected structure name");
         return false;
     }
-    std::string name = m_token.m_text;
+    std::string name = m_symbolPrefix + m_token.m_text;
     if (!CheckName (name))
         return false;
     if (m_vm.DataTypes ().StrucStored (name)) {         // Must be unused
@@ -571,7 +808,7 @@ bool TomBasicCompiler::CompileStructure () {
             SetError ("Expected 'dim' or 'endstruc'");
             return false;
         }*/
-        if (!CompileDim (true))
+        if (!CompileDim (true, false))
             return false;
 
         if (!SkipSeparators ())
@@ -609,7 +846,7 @@ bool TomBasicCompiler::CompileStructure () {
     return true;
 }
 
-bool TomBasicCompiler::CompileDim (bool forStruc) {
+bool TomBasicCompiler::CompileDim (bool forStruc, bool forFuncParam) {
 
     // Skip optional DIM
     if (m_token.m_text == "dim")
@@ -624,7 +861,7 @@ bool TomBasicCompiler::CompileDim (bool forStruc) {
 
     // Parse fields in dim
     bool needComma = false;             // First element doesn't need a comma
-    while (!AtSeparatorOrSpecial ()) {
+    while (!AtSeparatorOrSpecial () && (!forFuncParam || m_token.m_text != ")")) {
 
         // Handle commas
         if (needComma) {
@@ -640,7 +877,7 @@ bool TomBasicCompiler::CompileDim (bool forStruc) {
         // Extract field type
         std::string name;
         vmValType type;
-        if (!CompileDimField (name, type, forStruc))
+        if (!CompileDimField (name, type, forStruc, forFuncParam))
             return false;
         if (!CheckName (name))
             return false;
@@ -661,29 +898,122 @@ bool TomBasicCompiler::CompileDim (bool forStruc) {
             // Add field to structure
             m_vm.DataTypes ().NewField (name, type);
         }
+        else if (forFuncParam) {
+
+            // Find current function
+
+            // Check parameter of the same name has not already been added
+            int varIndex = m_userFuncPrototype.GetLocalVar(name);
+            if (varIndex >= 0) {
+                SetError((std::string)"There is already a function parameter called '" + name + "'");
+                return false;
+            }
+
+            // Add parameter type to function definition
+            m_userFuncPrototype.NewParam(name, type);
+        }
         else {
 
             // Regular DIM.
-            // Check if variable has already been DIMmed. (This is allowed, but
-            // only if DIMed to the same type.)
-            int varIndex = m_vm.Variables ().GetVar (name);
-            if (varIndex >= 0) {
-                if (!(m_vm.Variables ().Variables () [varIndex].m_type == type)) {
-                    SetError ((std::string) "Variable '" + name + "' has already been allocated as a different type.");
-                    return false;
+            // Prefix DIMmed variable names
+            name = m_symbolPrefix + name;
+
+            if (m_inFunction) {
+
+                // Local variable
+
+                // Check if variable has already been DIMmed locally. (This is
+                // allowed, but only if DIMmed to the same type.)
+                int varIndex = UserPrototype().GetLocalVar(name);
+                if (varIndex >= 0) {
+                    if (!(UserPrototype().localVarTypes[varIndex] == type)) {
+                        SetError((std::string) "Local variable '" + name + "' has already been allocated as a different type.");
+                        return false;
+                    }
+
+                    // Variable already created (earlier), so fall through to
+                    // allocation code generation
                 }
+                else
+                    // Create new variable
+                    varIndex = UserPrototype().NewLocalVar(name, type);
 
-                // Variable already created (earlier), so fall through to
-                // allocation code generation.
+                // Generate code to allocate local variable data
+                // Note:    Opcode contains the index of the variable. Variable
+                //          type and size data stored in the user function defn.
+                AddInstruction(OP_DECLARE_LOCAL, VTP_INT, vmValue(varIndex));
+
+                // Data containing strings will need to be "destroyed" when the stack unwinds.
+                if (m_vm.DataTypes().ContainsString(type))
+                    AddInstruction(OP_REG_DESTRUCTOR, VTP_INT, vmValue((vmInt)m_vm.StoreType(type)));
+
+                // Optional "= value"?
+                if (m_token.m_text == "=") {
+
+                    // Add opcode to load variable address
+                    AddInstruction (OP_LOAD_LOCAL_VAR, VTP_INT, vmValue(varIndex));
+
+                    // Set register type
+                    m_regType = UserPrototype().localVarTypes[varIndex];
+                    m_regType.m_pointerLevel++;
+
+                    // Compile single deref.
+                    // Unlike standard variable assignment, we don't automatically
+                    // deref pointers here. (Otherwise it would be impossible to
+                    // set the pointer within the DIM statement).
+                    if (!CompileDeref())
+                        return false;
+
+                    // Compile the rest of the assignment
+                    if (!InternalCompileAssignment())
+                        return false;   
+                }
             }
-            else
-                // Create new variable
-                varIndex = m_vm.Variables ().NewVar (name, type);
+            else {
 
-            // Generate code to allocate variable data
-            // Note:    Opcode contains the index of the variable. Variable type
-            //          and size data is stored in the variable entry.
-            AddInstruction (OP_DECLARE, VTP_INT, vmValue (varIndex));
+                // Check if variable has already been DIMmed. (This is allowed, but
+                // only if DIMed to the same type.)
+                int varIndex = m_vm.Variables ().GetVar (name);
+                if (varIndex >= 0) {
+                    if (!(m_vm.Variables ().Variables () [varIndex].m_type == type)) {
+                        SetError ((std::string) "Variable '" + name + "' has already been allocated as a different type.");
+                        return false;
+                    }
+
+                    // Variable already created (earlier), so fall through to
+                    // allocation code generation.
+                }
+                else
+                    // Create new variable
+                    varIndex = m_vm.Variables ().NewVar (name, type);
+
+                // Generate code to allocate variable data
+                // Note:    Opcode contains the index of the variable. Variable type
+                //          and size data is stored in the variable entry.
+                AddInstruction (OP_DECLARE, VTP_INT, vmValue (varIndex));
+
+                // Optional "= value"?
+                if (m_token.m_text == "=") {
+
+                    // Add opcode to load variable address
+                    AddInstruction (OP_LOAD_VAR, VTP_INT, vmValue(varIndex));
+
+                    // Set register type
+                    m_regType = m_vm.Variables().Variables()[varIndex].m_type;
+                    m_regType.m_pointerLevel++;
+
+                    // Compile single deref.
+                    // Unlike standard variable assignment, we don't automatically
+                    // deref pointers here. (Otherwise it would be impossible to
+                    // set the pointer within the DIM statement).
+                    if (!CompileDeref())
+                        return false;
+
+                    // Compile the rest of the assignment
+                    if (!InternalCompileAssignment())
+                        return false;
+                }
+            }
 
             // If this was an array and not a pointer, then its array indices
             // will have been pushed to the stack.
@@ -696,14 +1026,155 @@ bool TomBasicCompiler::CompileDim (bool forStruc) {
     return true;
 }
 
-bool TomBasicCompiler::CompileDimField (std::string& name, vmValType& type, bool forStruc) {
+bool TomBasicCompiler::CompileTokenName(std::string& name, compTokenType& tokenType, bool allowSuffix) {
+    name = "";
+    tokenType = m_token.m_type;
+    name = m_token.m_text;
+
+    if (tokenType != CTT_TEXT &&
+            tokenType != CTT_USER_FUNCTION &&
+            tokenType != CTT_RUNTIME_FUNCTION) {
+        SetError((std::string)"Expected name");
+        return false;
+    }
+
+    if (!allowSuffix) {
+        char last = name[name.length() - 1];
+        if (last == '#' || last == '%' || last == '$') {
+            SetError((std::string)"Subroutine names cannot end with: " + last);
+            return false;
+        }
+    }
+
+    if (!GetToken ())
+        return false;
+
+    return true;
+}
+
+bool TomBasicCompiler::CompileDataType(std::string& name, vmValType& type, compTokenType& tokenType) {
 
     type = VTP_UNDEFINED;
     name = "";
 
     // Look for structure type
     if (m_token.m_type == CTT_TEXT) {
-        int i = m_vm.DataTypes ().GetStruc (m_token.m_text);
+        std::string structureName = m_symbolPrefix + m_token.m_text;
+        int i = m_vm.DataTypes ().GetStruc (structureName);
+        if (i >= 0) {
+            type.m_basicType = (vmBasicValType) i;
+            if (!GetToken ())           // Skip token type keyword
+                return false;
+        }
+    }
+
+    // Look for preceeding & (indicates pointer)
+    if (m_token.m_text == "&") {
+        type.m_pointerLevel++;
+        if (!GetToken ())
+            return false;
+    }
+
+    // Look for variable name
+    if (!CompileTokenName(name, tokenType, true))
+        return false;
+
+/*    if (m_token.m_type != CTT_TEXT) {
+        SetError ("Expected variable name");
+        return false;
+    }
+
+    if (m_token.m_type != CTT_TEXT) {
+        SetError ("Expected variable name");
+        return false;
+    }
+    name = m_token.m_text;
+    if (!GetToken ())
+        return false;*/
+
+    // Determine variable type
+    assert (name.length () > 0);
+    char last = name [name.length () - 1];
+    if (type.m_basicType == VTP_UNDEFINED) {
+        if (last == '$')        type.m_basicType = VTP_STRING;
+        else if (last == '#')   type.m_basicType = VTP_REAL;
+        else if (last == '%')   type.m_basicType = VTP_INT;
+    }
+    else {
+        if (last == '$' || last == '#' || last == '%') {
+            SetError ((std::string) "\"" + name + "\" is a structure variable, and cannot end with #, $ or %");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool TomBasicCompiler::CompileAs(std::string& name, vmValType& type) {
+    if (type.m_basicType != VTP_UNDEFINED) {
+        SetError ("'" + name + "'s type has already been defined. Cannot use 'as' here.");
+        return false;
+    }
+
+    // Skip "as"
+    if (!GetToken ())
+        return false;
+
+    // Expect "single", "double", "integer", "string" or a structure type
+    if (m_token.m_type != CTT_TEXT && m_token.m_type != CTT_KEYWORD) {
+        SetError ("Expected 'single', 'double', 'integer', 'string' or type name");
+        return false;
+    }
+    if (m_token.m_text == "integer")
+        type.m_basicType = VTP_INT;
+    else    if (m_token.m_text == "single"
+            ||  m_token.m_text == "double")
+
+        // Note: Basic4GL supports only one type of floating point number.
+        // We will accept both keywords, but simply allocate a real (= single
+        // precision) floating point number each time.
+        type.m_basicType = VTP_REAL;
+    else if (m_token.m_text == "string")
+        type.m_basicType = VTP_STRING;
+    else {
+
+        // Look for recognised structure name
+        std::string structureName = m_symbolPrefix + m_token.m_text;
+        int i = m_vm.DataTypes ().GetStruc (structureName);
+        if (i < 0) {
+            SetError ("Expected 'single', 'double', 'integer', 'string' or type name");
+            return false;
+        }
+        type.m_basicType = (vmBasicValType) i;
+    }
+
+    // Skip type name
+    if (!GetToken())
+        return false;
+
+    return true;
+}
+
+bool TomBasicCompiler::CompileDimField (std::string& name, vmValType& type, bool forStruc, bool forFuncParam) {
+
+    // Compile data type
+    compTokenType tokenType;
+    if (!CompileDataType(name, type, tokenType))
+        return false;
+
+    // Name token must be text
+    if (tokenType != CTT_TEXT) {
+        SetError ("Expected variable name");
+        return false;
+    }
+
+/*    type = VTP_UNDEFINED;
+    name = "";
+
+    // Look for structure type
+    if (m_token.m_type == CTT_TEXT) {
+        std::string structureName = m_symbolPrefix + m_token.m_text;
+        int i = m_vm.DataTypes ().GetStruc (structureName);
         if (i >= 0) {
             type.m_basicType = (vmBasicValType) i;
             if (!GetToken ())           // Skip token type keyword
@@ -741,7 +1212,7 @@ bool TomBasicCompiler::CompileDimField (std::string& name, vmValType& type, bool
             SetError ((std::string) "\"" + name + "\" is a structure variable, and cannot end with #, $ or %");
             return false;
         }
-    }
+    }*/
 
     // Look for array dimensions
     if (m_token.m_text == "(") {
@@ -770,17 +1241,20 @@ bool TomBasicCompiler::CompileDimField (std::string& name, vmValType& type, bool
             // evaluate at compile time (i.e right now).
             else if (forStruc) {
 
-                if (m_token.m_type != CTT_CONSTANT || m_token.m_valType != VTP_INT) {
-                    SetError ("Expected array size as integer constant");
+                // Evaluate constant expression
+                vmBasicValType expressionType = VTP_INT;
+                vmValue value;
+                std::string stringValue;
+                if (!EvaluateConstantExpression (expressionType, value, stringValue))
                     return false;
-                }
 
-                // Store array dimension.
-                // Note: Add one, because DIM array(N) actually allocates N+1 entries
-                // (0,1,...,N inclusive).
-                type << (StringToInt (m_token.m_text) + 1);
-                if (!GetToken ())
-                    return false;
+                // Store array dimension
+                type << (value.IntVal() + 1);
+            }
+            else if (forFuncParam) {
+                // Array sizes for function parameters aren't declared.
+                // (Syntax is "dim myArray()")
+                type.m_arrayLevel++;
             }
             // Regular DIMmed array dimensions are sized at run time.
             // Here we generate code to calculate the dimension size and push it to
@@ -808,46 +1282,14 @@ bool TomBasicCompiler::CompileDimField (std::string& name, vmValType& type, bool
 
     // "as" keyword (QBasic/FreeBasic compatibility)
     if (m_token.m_text == "as") {
-        if (type.m_basicType != VTP_INT || last == '%') {
-            SetError ("'" + name + "'s type has already been defined. Cannot use 'as' here.");
-            return false;
-        }
-
-        // Skip "as"
-        if (!GetToken ())
-            return false;
-
-        // Expect "single", "double", "integer", "string" or a structure type
-        if (m_token.m_type != CTT_TEXT && m_token.m_type != CTT_KEYWORD) {
-            SetError ("Expected 'single', 'double', 'real', 'integer', 'string' or type name");
-            return false;
-        }
-        if (m_token.m_text == "integer")
-            type.m_basicType = VTP_INT;
-        else    if (m_token.m_text == "single"
-                ||  m_token.m_text == "double")
-
-            // Note: Basic4GL supports only one type of floating point number.
-            // We will accept both keywords, but simply allocate a real (= single
-            // precision) floating point number each time.
-            type.m_basicType = VTP_REAL;
-        else if (m_token.m_text == "string")
-            type.m_basicType = VTP_STRING;
-        else {
-
-            // Look for recognised structure name
-            int i = m_vm.DataTypes ().GetStruc (m_token.m_text);
-            if (i < 0) {
-                SetError ("Expected 'single', 'double', 'real', 'integer', 'string' or type name");
-                return false;
-            }
-            type.m_basicType = (vmBasicValType) i;
-        }
-
-        // Skip type name
-        if (!GetToken())
+        if (!CompileAs(name, type))
             return false;
     }
+
+    // If data type still not specified, default to integer
+    if (type.m_basicType == VTP_UNDEFINED)
+        type.m_basicType = VTP_INT;
+
     return true;
 }
 
@@ -866,21 +1308,60 @@ bool TomBasicCompiler::CompileLoadVar () {
         SetError ("Expected variable name");
         return false;
     }
-    int varIndex = m_vm.Variables ().GetVar (m_token.m_text);
-    if (!m_vm.Variables ().IndexValid (varIndex)) {
-        SetError ((std::string) "Unknown variable: " + m_token.m_text + ". Must be declared with DIM");
+
+    // Prefix variable names
+    std::string varName = m_symbolPrefix + m_token.m_text;
+
+    // Find variable
+    bool found = false;
+
+    // Check local variable first
+    if (m_inFunction) {
+
+        // Look for variable
+        int varIndex = UserPrototype().GetLocalVar(varName);
+
+        // Set register type
+        if (varIndex >= 0) {
+
+            // Generate code to load variable
+            AddInstruction (OP_LOAD_LOCAL_VAR, VTP_INT, vmValue(varIndex));
+
+            // Set register type
+            m_regType = UserPrototype().localVarTypes[varIndex];
+            m_regType.m_pointerLevel++;
+
+            found = true;
+        }
+    }
+
+    // Then try global
+    if (!found) {
+
+        // Look for variable
+        int varIndex = m_vm.Variables().GetVar(varName);
+
+        if (varIndex >= 0)  {
+
+            // Generate code to load variable
+            AddInstruction (OP_LOAD_VAR, VTP_INT, vmValue(varIndex));
+
+            // Set register type
+            m_regType = m_vm.Variables().Variables()[varIndex].m_type;
+            m_regType.m_pointerLevel++;
+
+            found = true;
+        }
+    }
+
+    if (!found) {
+        SetError((std::string) "Unknown variable: " + m_token.m_text + ". Variables must be declared first with DIM");
         return false;
     }
+
+    // Skip past variable name
     if (!GetToken ())
         return false;
-
-    // Generate code to load variable
-    AddInstruction (OP_LOAD_VAR, VTP_INT, vmValue (varIndex));
-
-    // Register now contains a pointer to variable
-    vmVariable& var = m_vm.Variables ().Variables () [varIndex];
-    m_regType = var.m_type;
-    m_regType.m_pointerLevel++;
 
     // Dereference to reach data
     if (!CompileDerefs ())
@@ -1082,25 +1563,25 @@ bool TomBasicCompiler::CompileExpression (bool mustBeConstant) {
 
     // Push "stop evaluation" operand to stack. (To protect any existing operators
     // on the stack.
-    m_operatorStack.push_back (compOperator (OT_STOP, OP_NOP, 0, -200000));    // Stop evaluation operator
+    m_operatorStack.push_back (compStackedOperator(compOperator (OT_STOP, OP_NOP, 0, -200000)));    // Stop evaluation operator
 
     if (!CompileExpressionLoad (mustBeConstant))
         return false;
 
     compOperatorMap::iterator o;
-    while ((m_token.m_text == ")" && OperatorTOS ().m_type != OT_STOP) || (o = m_binaryOperators.find (m_token.m_text)) != m_binaryOperators.end ()) {
+    while ((m_token.m_text == ")" && OperatorTOS ().m_op.m_type != OT_STOP) || (o = m_binaryOperators.find (m_token.m_text)) != m_binaryOperators.end ()) {
 
         // Special case, right bracket
         if (m_token.m_text == ")") {
 
             // Evaluate all operators down to left bracket
-            while (OperatorTOS ().m_type != OT_STOP && OperatorTOS ().m_type != OT_LBRACKET)
+            while (OperatorTOS ().m_op.m_type != OT_STOP && OperatorTOS ().m_op.m_type != OT_LBRACKET)
                 if (!CompileOperation ())
                     return false;
 
             // If operator stack is empty, then the expression terminates before
             // the closing bracket
-            if (OperatorTOS ().m_type == OT_STOP) {
+            if (OperatorTOS ().m_op.m_type == OT_STOP) {
                 m_operatorStack.pop_back ();            // Remove stopper
                 return true;
             }
@@ -1122,12 +1603,26 @@ bool TomBasicCompiler::CompileExpression (bool mustBeConstant) {
         else {
 
             // Compare current operator with top of stack operator
-            while (OperatorTOS ().m_type != OT_STOP && OperatorTOS ().m_binding >= (*o).second.m_binding)
+            while (OperatorTOS ().m_op.m_type != OT_STOP && OperatorTOS ().m_op.m_binding >= (*o).second.m_binding)
                 if (!CompileOperation ())
                     return false;
 
+            // 14-Apr-06: Lazy evaluation.
+            // Add jumps around the second part of AND or OR operations
+            int lazyJumpAddr = -1;
+            if ((*o).second.m_type == OT_LAZYBOOLOPERATOR) {
+                if ((*o).second.m_opCode == OP_OP_AND) {
+                    lazyJumpAddr = m_vm.InstructionCount();
+                    AddInstruction(OP_JUMP_FALSE, VTP_INT, vmValue(0));
+                }
+                else if ((*o).second.m_opCode == OP_OP_OR) {
+                    lazyJumpAddr = m_vm.InstructionCount();
+                    AddInstruction(OP_JUMP_TRUE, VTP_INT, vmValue(0));
+                }
+            }
+
             // Save operator to stack
-            m_operatorStack.push_back ((*o).second);
+            m_operatorStack.push_back (compStackedOperator((*o).second, lazyJumpAddr));
 
             // Push first operand
             if (!CompilePush ())
@@ -1142,7 +1637,7 @@ bool TomBasicCompiler::CompileExpression (bool mustBeConstant) {
     }
 
     // Perform remaining operations
-    while (OperatorTOS ().m_type != OT_STOP)
+    while (OperatorTOS ().m_op.m_type != OT_STOP)
         if (!CompileOperation ())
             return false;
 
@@ -1158,20 +1653,20 @@ bool TomBasicCompiler::CompileOperation () {
     assert (!m_operatorStack.empty ());
 
     // Remove operator from stack
-    compOperator& o = OperatorTOS ();
+    compStackedOperator o = OperatorTOS ();
     m_operatorStack.pop_back ();
 
     // Must not be a left bracket
-    if (o.m_type == OT_LBRACKET) {
+    if (o.m_op.m_type == OT_LBRACKET) {
         SetError ("Expected ')'");
         return false;
     }
 
     // Binary or unary operation?
-    if (o.m_params == 1) {
+    if (o.m_op.m_params == 1) {
 
         // Try plug in language extension first
-        if (CompileExtendedUnOperation (o.m_opCode))
+        if (CompileExtendedUnOperation (o.m_op.m_opCode))
             return true;
 
         // Can only operate on basic types.
@@ -1183,25 +1678,25 @@ bool TomBasicCompiler::CompileOperation () {
 
         // Special case, boolean operator.
         // Must convert to boolean first
-        if (o.m_type == OT_BOOLOPERATOR)
+        if (o.m_op.m_type == OT_BOOLOPERATOR || o.m_op.m_type == OT_LAZYBOOLOPERATOR)
             CompileConvert (VTP_INT);
 
         // Perform unary operation
-        AddInstruction (o.m_opCode, m_regType.m_basicType, vmValue ());
+        AddInstruction (o.m_op.m_opCode, m_regType.m_basicType, vmValue ());
 
         // Special case, boolean operator
         // Result will be an integer
-        if (o.m_type == OT_RETURNBOOLOPERATOR)
+        if (o.m_op.m_type == OT_RETURNBOOLOPERATOR)
             m_regType = VTP_INT;
     }
-    else if (o.m_params == 2) {
+    else if (o.m_op.m_params == 2) {
 
         // Generate code to pop first operand from stack into Reg2
         if (!CompilePop ())
             return false;
 
         // Try plug in language extension first
-        if (CompileExtendedBinOperation (o.m_opCode))
+        if (CompileExtendedBinOperation (o.m_op.m_opCode))
             return true;
 
         // Ensure operands are equal type. Generate code to convert one if necessary.
@@ -1210,7 +1705,7 @@ bool TomBasicCompiler::CompileOperation () {
         if (m_regType.IsNull () || m_reg2Type.IsNull ()) {
 
             // Can compare NULL to any pointer type. However, operator must be '=' or '<>'
-            if (o.m_opCode != OP_OP_EQUAL && o.m_opCode != OP_OP_NOT_EQUAL) {
+            if (o.m_op.m_opCode != OP_OP_EQUAL && o.m_op.m_opCode != OP_OP_NOT_EQUAL) {
                 SetError ("Operator cannot be applied to this data type");
                 return false;
             }
@@ -1231,7 +1726,7 @@ bool TomBasicCompiler::CompileOperation () {
 
             // Can compare 2 pointers. However operator must be '=' or '<>' and
             // pointer types must be exactly the same
-            if (o.m_opCode != OP_OP_EQUAL && o.m_opCode != OP_OP_NOT_EQUAL) {
+            if (o.m_op.m_opCode != OP_OP_EQUAL && o.m_op.m_opCode != OP_OP_NOT_EQUAL) {
                 SetError ("Operator cannot be applied to this data type");
                 return false;
             }
@@ -1254,26 +1749,32 @@ bool TomBasicCompiler::CompileOperation () {
             vmBasicValType highest = m_regType.m_basicType;
             if (m_reg2Type.m_basicType > highest)
                 highest = m_reg2Type.m_basicType;
-            if (o.m_type == OT_BOOLOPERATOR)
+            if (o.m_op.m_type == OT_BOOLOPERATOR || o.m_op.m_type == OT_LAZYBOOLOPERATOR)
                 highest = VTP_INT;
-            if (m_syntax == LS_TRADITIONAL && o.m_opCode == OP_OP_DIV)        // 14-Aug-05 Tom: In traditional mode, division is always between floating pt numbers
+            if (m_syntax == LS_TRADITIONAL && o.m_op.m_opCode == OP_OP_DIV)     // 14-Aug-05 Tom: In traditional mode, division is always between floating pt numbers
                 highest = VTP_REAL;
 
-            CompileConvert (highest);
-            CompileConvert2 (highest);
+            if (!CompileConvert(highest))
+                return false;
+            if (!CompileConvert2(highest))
+                return false;
             opCodeType = highest;
         }
 
         // Generate operation code
-        AddInstruction (o.m_opCode, opCodeType, vmValue ());
+        AddInstruction (o.m_op.m_opCode, opCodeType, vmValue ());
 
         // Special case, boolean operator
         // Result will be an integer
-        if (o.m_type == OT_RETURNBOOLOPERATOR)
+        if (o.m_op.m_type == OT_RETURNBOOLOPERATOR)
             m_regType = VTP_INT;
     }
     else
         assert (false);
+
+    // Fix up lazy jumps
+    if (o.m_lazyJumpAddr >= 0)
+        m_vm.Instruction(o.m_lazyJumpAddr).m_value = (int) m_vm.InstructionCount();
 
     return true;
 }
@@ -1314,22 +1815,28 @@ bool TomBasicCompiler::CompileLoad () {
         return CompileLoadConst ();
     else if (m_token.m_type == CTT_TEXT || m_token.m_text == "&")
         return CompileLoadVar ();
-    else if (m_token.m_type == CTT_FUNCTION) {
+    else if (m_token.m_type == CTT_FUNCTION)
         return CompileFunction (true);
-    }
+    else if (m_token.m_type == CTT_USER_FUNCTION)
+        return CompileUserFunctionCall(true, false);
+    else if (m_token.m_type == CTT_RUNTIME_FUNCTION)
+        return CompileUserFunctionCall(true, true);
 
     SetError ("Expected constant, variable or function");
     return false;
 }
 
+bool TomBasicCompiler::CompileNull() {
+    AddInstruction (OP_LOAD_CONST, VTP_INT, vmValue (0));       // Load 0 into register
+    m_regType = vmValType (VTP_NULL, 0, 1, false);              // Type is pointer to VTP_NULL
+    return GetToken ();
+}
+
 bool TomBasicCompiler::CompileLoadConst () {
 
     // Special case, "NULL" reserved word
-    if (m_token.m_text == "null") {
-        AddInstruction (OP_LOAD_CONST, VTP_INT, vmValue (0));       // Load 0 into register
-        m_regType = vmValType (VTP_NULL, 0, 1, false);              // Type is pointer to VTP_NULL
-        return GetToken ();
-    }
+    if (m_token.m_text == "null")
+        return CompileNull();
 
     // Compile load constant
     if (m_token.m_type == CTT_CONSTANT) {
@@ -1350,7 +1857,7 @@ bool TomBasicCompiler::CompileLoadConst () {
             m_regType = VTP_REAL;
         }
         else if (m_token.m_valType == VTP_INT) {
-            AddInstruction (OP_LOAD_CONST, VTP_INT, vmValue (StringToInt (m_token.m_text)));
+            AddInstruction (OP_LOAD_CONST, VTP_INT, vmValue(StringToInt(m_token.m_text)));
             m_regType = VTP_INT;
         }
         else {
@@ -1471,7 +1978,7 @@ bool TomBasicCompiler::CompileTakeAddress () {
     m_vm.RemoveLastInstruction ();
     m_regType.m_pointerLevel++;
 
-    return true;        
+    return true;
 }
 
 bool TomBasicCompiler::CompileAssignment () {
@@ -1479,6 +1986,15 @@ bool TomBasicCompiler::CompileAssignment () {
     // Generate code to load target variable
     if (!CompileLoadVar ())
         return false;
+
+    // Compile code to assign value to variable
+    if (!InternalCompileAssignment())
+        return false;
+
+    return true;
+}
+
+bool TomBasicCompiler::InternalCompileAssignment() {
 
     // Expect =
     if (m_token.m_text != "=") {
@@ -1526,12 +2042,17 @@ bool TomBasicCompiler::CompileAssignment () {
     // Pointer case. m_reg2 must point to a pointer and m_reg1 point to a value.
     else if (m_reg2Type.VirtualPointerLevel () == 2 && m_regType.VirtualPointerLevel () == 1) {
 
-        // Must both point to same type, OR m_reg1 must point to NULL 
+        // Must both point to same type, OR m_reg1 must point to NULL
         if (    m_regType.IsNull ()
             || (    m_regType.m_arrayLevel == m_reg2Type.m_arrayLevel
-                &&  m_regType.m_basicType  == m_reg2Type.m_basicType))
-            AddInstruction (OP_SAVE, VTP_INT, vmValue ());              // Generate code to save address
-            
+                &&  m_regType.m_basicType  == m_reg2Type.m_basicType)) {
+
+            // Validate pointer scope before saving to variable
+            AddInstruction(OP_CHECK_PTR, VTP_INT, vmValue());
+
+            // Save address to pointer
+            AddInstruction(OP_SAVE, VTP_INT, vmValue());
+        }
         else {
             SetError ("Types do not match");
             return false;
@@ -1545,8 +2066,17 @@ bool TomBasicCompiler::CompileAssignment () {
 
         // Check that both are the same type
         if (    m_regType.m_arrayLevel == m_reg2Type.m_arrayLevel
-            &&  m_regType.m_basicType  == m_reg2Type.m_basicType)
+            &&  m_regType.m_basicType  == m_reg2Type.m_basicType) {
+
+            // Add op-code to check pointers if necessary
+            vmValType dataType = m_regType;
+            dataType.m_pointerLevel--;
+            dataType.m_byRef = false;
+            if (m_vm.DataTypes().ContainsPointer(dataType))
+                AddInstruction(OP_CHECK_PTRS, VTP_INT, vmValue((vmInt) m_vm.StoreType(dataType)));
+
             AddInstruction (OP_COPY, VTP_INT, vmValue ((vmInt) m_vm.StoreType (m_regType)));
+        }
         else {
             SetError ("Types do not match");
             return false;
@@ -1566,6 +2096,12 @@ bool TomBasicCompiler::CompileGoto (vmOpCode jumpType) {
             ||  jumpType == OP_JUMP_FALSE
             ||  jumpType == OP_CALL);
 
+    // Cannot use goto inside a function or sub (can use GOSUB though)
+    if (m_inFunction && jumpType != OP_CALL) {
+        SetError("Cannot use 'goto' inside a function or subroutine");
+        return false;
+    }
+
     // Validate label
     if (m_token.m_type != CTT_TEXT) {
         SetError ("Expected label name");
@@ -1573,7 +2109,8 @@ bool TomBasicCompiler::CompileGoto (vmOpCode jumpType) {
     }
 
     // Record jump, so that we can fix up the offset in the second compile pass.
-    m_jumps.push_back (compJump (m_vm.InstructionCount (), m_token.m_text));
+    std::string labelName = m_symbolPrefix + m_token.m_text;
+    m_jumps.push_back (compJump (m_vm.InstructionCount (), labelName));
 
     // Add jump instruction
     AddInstruction (jumpType, VTP_INT, vmValue (0));
@@ -1653,7 +2190,7 @@ bool TomBasicCompiler::CompileElse (bool elseif) {
     AddInstruction (OP_JUMP, VTP_INT, vmValue (0));
 
     // Fixup jump around IF block
-    assert (top.m_jumpOut < m_vm.InstructionCount ());
+    assert ((unsigned)top.m_jumpOut < m_vm.InstructionCount ());
     m_vm.Instruction (top.m_jumpOut).m_value.IntVal () = m_vm.InstructionCount ();
 
     m_needColon = false;                // Don't need colon between this and next instruction
@@ -1677,7 +2214,7 @@ bool TomBasicCompiler::CompileEndIf (bool automatic) {
     }
 
     // Fixup jump around IF or ELSE block
-    assert (top.m_jumpOut < m_vm.InstructionCount ());
+    assert ((unsigned)top.m_jumpOut < m_vm.InstructionCount ());
     m_vm.Instruction (top.m_jumpOut).m_value.IntVal () = m_vm.InstructionCount ();
 
     // If there's an implied endif then add it
@@ -1702,17 +2239,50 @@ bool TomBasicCompiler::CompileFor () {
         SetError ("Cannot use array variable in 'for' - 'next' structure");
         return false;
     }
-    std::string loopVar = m_token.m_text;
+    std::string loopVarUnprefixed = m_token.m_text;
+    std::string loopVar = m_symbolPrefix + loopVarUnprefixed;
 
     // Verify variable is numeric
-    int varIndex = m_vm.Variables ().GetVar(loopVar);
-    if (varIndex < 0) {
-        SetError ((std::string) "Unknown variable: " + m_token.m_text + ". Must be declared with DIM");
-        return false;
+    bool found = false;
+    vmBasicValType loopVarType;
+
+    // Check local variable first
+    if (m_inFunction) {
+
+        // Look for variable
+        int varIndex = UserPrototype().GetLocalVar(loopVar);
+
+        // Set register type
+        if (varIndex >= 0) {
+            found = true;
+
+            // Check type is INT or REAL
+            vmValType& type = UserPrototype().localVarTypes[varIndex];
+            if (!(type == VTP_INT || type == VTP_REAL)) {
+                SetError ((std::string) "Loop variable must be an Integer or Real");
+                return false;
+            }
+            loopVarType = type.m_basicType;
+        }
     }
-    vmVariable& var = m_vm.Variables ().Variables () [varIndex];
-    if (!(var.m_type == VTP_INT || var.m_type == VTP_REAL)) {
-        SetError ((std::string) "Loop variable must be an Integer or Real");
+
+    // Check global variable
+    if (!found) {
+        int varIndex = m_vm.Variables().GetVar(loopVar);
+        if (varIndex >= 0) {
+            found = true;
+
+            // Check type is INT or REAL
+            vmValType& type = m_vm.Variables().Variables()[varIndex].m_type;
+            if (!(type == VTP_INT || type == VTP_REAL)) {
+                SetError ((std::string) "Loop variable must be an Integer or Real");
+                return false;
+            }
+            loopVarType = type.m_basicType;
+        }
+    }
+    if (!found) {
+        SetError ((std::string) "Unknown variable: " + m_token.m_text + ". Must be declared with DIM");
         return false;
     }
 
@@ -1748,11 +2318,11 @@ bool TomBasicCompiler::CompileFor () {
     // Compile "to" expression
     if (!CompileExpression ())
         return false;
-    if (!CompileConvert (var.m_type))
+    if (!CompileConvert (loopVarType))
         return false;
 
     // Evaluate step. (Must be a constant expression)
-    vmBasicValType stepType = var.m_type.m_basicType;
+    vmBasicValType stepType = loopVarType;
     vmValue stepValue;
 
     if (m_token.m_text == "step") {
@@ -1796,7 +2366,7 @@ bool TomBasicCompiler::CompileFor () {
         return false;
 
     // Generate step expression
-    std::string step = loopVar + " = " + loopVar + " + " + (stepType == VTP_INT ? IntToString (stepValue.IntVal ()) : RealToString (stepValue.RealVal ()));
+    std::string step = loopVarUnprefixed + " = " + loopVarUnprefixed + " + " + (stepType == VTP_INT ? IntToString (stepValue.IntVal ()) : RealToString (stepValue.RealVal ()));
 
     // Create flow control structure
     m_flowControl.push_back (compFlowControl (FCT_FOR, m_vm.InstructionCount (), loopPos, line, col, false, step));
@@ -1811,7 +2381,7 @@ bool TomBasicCompiler::CompileNext () {
 
     // Find for on top of flow control stack
     if (!FlowControlTopIs (FCT_FOR)) {
-        SetError ("'for' without 'next'");
+        SetError ("'next' without 'for'");
         return false;
     }
     compFlowControl top = FlowControlTOS ();
@@ -1838,7 +2408,7 @@ bool TomBasicCompiler::CompileNext () {
     AddInstruction (OP_JUMP, VTP_INT, vmValue (top.m_jumpLoop));
 
     // Fixup jump around FOR block
-    assert (top.m_jumpOut < m_vm.InstructionCount ());
+    assert ((unsigned)top.m_jumpOut < m_vm.InstructionCount ());
     m_vm.Instruction (top.m_jumpOut).m_value.IntVal () = m_vm.InstructionCount ();
     return true;
 }
@@ -1891,7 +2461,7 @@ bool TomBasicCompiler::CompileWend () {
     AddInstruction (OP_JUMP, VTP_INT, vmValue (top.m_jumpLoop));
 
     // Fixup jump around WHILE block
-    assert (top.m_jumpOut < m_vm.InstructionCount ());
+    assert ((unsigned)top.m_jumpOut < m_vm.InstructionCount ());
     m_vm.Instruction (top.m_jumpOut).m_value.IntVal () = m_vm.InstructionCount ();
     return true;
 }
@@ -1918,14 +2488,24 @@ void TomBasicCompiler::AddFunction (    std::string         name,
                                         bool                brackets,
                                         vmValType           returnType,
                                         bool                timeshare,
-                                        bool                freeTempData) {
+                                        bool                freeTempData,
+                                        compParamValidationCallback paramValidationCallback) {
 
     // Register wrapper function to virtual machine
     int vmIndex = m_vm.AddFunction (func);
 
     // Register function spec to compiler
     int specIndex = m_functions.size ();
-    m_functions.push_back (compFuncSpec (params, isFunction, brackets, returnType, timeshare, vmIndex, freeTempData));
+    m_functions.push_back (
+            compFuncSpec (
+                params,
+                isFunction,
+                brackets,
+                returnType,
+                timeshare,
+                vmIndex,
+                freeTempData,
+                paramValidationCallback));
 
     // Add function name -> function spec mapping
     m_functionIndex.insert (std::make_pair(LowerCase (name), specIndex));
@@ -1937,21 +2517,20 @@ bool TomBasicCompiler::CompileFunction (bool needResult) {
     // (Note: There may be more than one with the same name.
     // We collect the possible candidates in an array, and prune out the ones
     // whose paramater types are incompatible as we go..)
-    compFuncSpec *functions [TC_MAXOVERLOADEDFUNCTIONS];
     int functionCount = 0;
 
+    // Find builtin functions
     bool found = false;
     compFuncIndex::iterator it;
     for (   it = m_functionIndex.find (m_token.m_text);
-            it != m_functionIndex.end () &&  (*it).first == m_token.m_text && functionCount < TC_MAXOVERLOADEDFUNCTIONS;
-            it++) {
-        compFuncSpec& spec = m_functions [(*it).second];                        // Get specification
+            it != m_functionIndex.end () && (*it).first == m_token.m_text && functionCount < TC_MAXOVERLOADEDFUNCTIONS;
+            it++) {                        // Get specification
         found = true;
 
         // Check whether function returns a value (if we need one)
-        if (!needResult || spec.m_isFunction)
-            functions [functionCount++] = &spec;
+      
     }
+
 
     // No functions?
     if (functionCount == 0) {
@@ -1976,50 +2555,17 @@ bool TomBasicCompiler::CompileFunction (bool needResult) {
     // Only the first instance will be checked to see whether we need brackets.
     // (Therefore either all instances should have brackets, or all instances
     // should have no brackets.)
-    bool brackets = functions [0]->m_brackets;
-    if (m_syntax == LS_TRADITIONAL && brackets) {       // Special brackets rules for traditional syntax
 
-        brackets = false;
-        // Look for a version of the function that:
-        //  * Has at least one parameter, AND
-        //  * Returns a value
-        //
-        // If one is found, then we require brackets. Otherwise we don't.
-        for (int i = 0; i < functionCount && !brackets; i++)
-            brackets = functions[i]->m_isFunction
-;//                    && functions[i]->m_paramTypes.Params().size() > 0;       // Need to rethink below loop before we can enable this
-    }
 
-    // Expect opening bracket
-    if (brackets) {
-        if (m_token.m_text != "(") {
-            SetError ("Expected '('");
-            return false;
-        }
-        // Skip it
-        if (!GetToken ())
-            return false;
-    }
+
 
     // Generate code to push parameters
     bool first = true;
-    int count = 0;
+    unsigned int count = 0;
+    unsigned int pushCount = 0;      // Usually pushCount = count (the parameter count). However "any type" parameters also have their data type pushed with them, in which case pushCount > count.
     while (functionCount > 0 && m_token.m_text != ")" && !AtSeparatorOrSpecial ()) {
 
-        // Trim functions with less parameters than we have found
-        int src, dst;
-        dst = 0;
-        for (src = 0; src < functionCount; src++)
-            if (functions [src]->m_paramTypes.Params ().size () > count)
-                functions [dst++] = functions [src];
-        functionCount = dst;
 
-        // None left?
-        if (functionCount == 0) {
-            if (brackets)   SetError ("Expected ')'");
-            else            SetError ("Expected ':' or end of line");
-            return false;
-        }
 
         if (!first) {
             // Expect comma
@@ -2039,29 +2585,34 @@ bool TomBasicCompiler::CompileFunction (bool needResult) {
 
         // Find first valid function which matches at this parameter
         int matchIndex = -1;
-        int i;
-        for (i = 0; i < functionCount && matchIndex < 0; i++)
-            if (CompileConvert (functions [i]->m_paramTypes.Params () [count]))     // Can convert register to parameter type
-                matchIndex = i;                                                     // Matching function found
+        bool isAnyType = false;
+
+//            if (CompileConvert (functions[i].m_spec->m_paramTypes.Params () [count]))     // Can convert register to parameter type
+//                matchIndex = i;                                                     // Matching function found
 
         if (matchIndex >= 0) {
 
             // Clear any errors that non-matching instances might have set.
             ClearError ();
 
-            vmValType& type = functions [matchIndex]->m_paramTypes.Params () [count];
-
             // Filter out all functions whose "count" parameter doesn't match "type".
-            int src, dst;
+            int dst;
             dst = 0;
-            for (src = 0; src < functionCount; src++)
-                if (functions [src]->m_paramTypes.Params () [count] == type)
-                    functions [dst++] = functions [src];
             functionCount = dst;
             assert (functionCount > 0);     // (Should at least have the function that originally matched the register)
 
             // Generate code to push parameter to stack
-            CompilePush ();
+            CompilePush();
+            pushCount++;
+
+            // If parameter is an "any type" then generate code to push the
+            // parameter type to the stack.
+            if (isAnyType) {
+                AddInstruction(OP_LOAD_CONST, VTP_INT, vmValue((vmInt)m_vm.StoreType(m_regType)));
+                m_regType = VTP_INT;
+                CompilePush();
+                pushCount++;
+            }
         }
         else
             return false;                   // No function matched. (Return last compile convert error).
@@ -2073,47 +2624,22 @@ bool TomBasicCompiler::CompileFunction (bool needResult) {
     int matchIndex = -1;
     int i;
     for (i = 0; i < functionCount && matchIndex < 0; i++)
-        if (functions [i]->m_paramTypes.Params ().size () == count)
-            matchIndex = i;
     if (matchIndex < 0) {
         if (count == 0) SetError ("Expected function parameter");
         else            SetError ("Expected ','");
         return false;
     }
-    compFuncSpec& spec = *functions [matchIndex];
 
-    // Expect closing bracket
-    if (brackets) {
-        if (m_token.m_text != ")") {
-            SetError ("Expected ')'");
-            return false;
-        }
-        // Skip it
-        if (!GetToken ())
-            return false;
-    }
 
-    // Generate code to call function
-    AddInstruction (OP_CALL_FUNC, VTP_INT, vmValue (spec.m_index));
 
-    // If function has return type, it will have changed the type in the register
-    if (spec.m_isFunction) {
-        m_regType = spec.m_returnType;
-        if (!CompileDataLookup (false))
-            return false;
-    }
-
-    // Note whether function has generated temporary data
-    m_freeTempData = m_freeTempData | spec.m_freeTempData;
+   
 
     // Generate code to clean up stack
-    for (int i2 = 0; i2 < count; i2++)
+    for (int i2 = 0; i2 < pushCount; i2++)
         if (!CompilePop ())
             return false;
 
-    // Generate explicit timesharing break (if necessary)
-    if (spec.m_timeshare)
-        AddInstruction (OP_TIMESHARE, VTP_INT, vmValue ());
+
 
     return true;
 }
@@ -2229,13 +2755,44 @@ bool TomBasicCompiler::CompileConstant () {
             return false;
 
         // Determine constant type from last character of constant name
-        vmBasicValType type = VTP_INT;
+        vmBasicValType type = VTP_UNDEFINED;
         if (name.length () > 0) {
             char last = name [name.length () - 1];
             if (last == '$')        type = VTP_STRING;
             else if (last == '#')   type = VTP_REAL;
             else if (last == '%')   type = VTP_INT;
         }
+
+        if (m_token.m_text == "as") {
+            if (type != VTP_UNDEFINED) {
+                SetError ("'" + name + "'s type has already been defined. Cannot use 'as' here.");
+                return false;
+            }
+            if (!GetToken ())
+                return false;
+            if (m_token.m_text == "integer")
+                type = VTP_INT;
+            else    if (m_token.m_text == "single"
+                    ||  m_token.m_text == "double")
+
+                // Note: Basic4GL supports only one type of floating point number.
+                // We will accept both keywords, but simply allocate a real (= single
+                // precision) floating point number each time.
+                type = VTP_REAL;
+            else if (m_token.m_text == "string")
+                type = VTP_STRING;
+            else {
+                SetError("Expected 'integer', 'single', 'double', 'string'");
+                return false;
+            }
+            if (!GetToken ())
+                return false;
+        }
+
+        // Default type to integer if not defined
+        if (type == VTP_UNDEFINED)
+            type = VTP_INT;
+
         // Expect =
         if (m_token.m_text != "=") {
             SetError ("Expected '='");
@@ -2305,7 +2862,7 @@ bool TomBasicCompiler::CompileExtendedUnOperation (vmOpCode oper) {
 
     // Iterate through external operator extension functions until we find
     // one that can handle our data.
-    for (int i = 0; i < m_unOperExts.size () && !found; i++) {
+    for (unsigned int i = 0; i < m_unOperExts.size () && !found; i++) {
 
         // Setup input data
         type            = m_regType;
@@ -2349,7 +2906,7 @@ bool TomBasicCompiler::CompileExtendedBinOperation (vmOpCode oper) {
 
     // Iterate through external operator extension functions until we find
     // one that can handle our data.
-    for (int i = 0; i < m_binOperExts.size () && !found; i++) {
+    for (unsigned int i = 0; i < m_binOperExts.size () && !found; i++) {
 
         // Setup input data
         type1           = m_regType;
@@ -2515,9 +3072,11 @@ std::string TomBasicCompiler::DescribeStackCall (unsigned int returnAddr) {
     return (*i).second;
 }
 
-bool TomBasicCompiler::TempCompileExpression (std::string expression, vmValType& valType) {
-    // Returns start address to execute
-    // or 0xffff if error.
+bool TomBasicCompiler::TempCompileExpression (
+    std::string expression,
+    vmValType& valType,
+    bool inFunction,
+    int currentFunction) {
 
     // Load expression into parser
     m_parser.SourceCode ().clear ();
@@ -2528,6 +3087,8 @@ bool TomBasicCompiler::TempCompileExpression (std::string expression, vmValType&
 
     // Reset compiler state
     ClearState ();
+    m_inFunction = inFunction;
+    m_currentFunction = currentFunction;
 
     // Clear error state
     ClearError ();
@@ -2682,7 +3243,8 @@ bool TomBasicCompiler::CompileDataReset () {
         }
 
         // Record reset, so that we can fix up the offset in the second compile pass.
-        m_resets.push_back (compJump (m_vm.InstructionCount (), m_token.m_text));
+        std::string labelName = m_symbolPrefix + m_token.m_text;
+        m_resets.push_back (compJump (m_vm.InstructionCount (), labelName));
 
         // Skip label name
         if (!GetToken ())
@@ -2782,7 +3344,7 @@ compFuncSpec *TomBasicCompiler::FindFunction(std::string name, int paramCount) {
             it != m_functionIndex.end () && (*it).first == name;
             it++) {
         compFuncSpec& spec = m_functions[(*it).second];
-        if (spec.m_paramTypes.Params().size() == paramCount)
+        if (spec.m_paramTypes.Params().size() == (unsigned)paramCount)
             return &spec;
     }
 
@@ -3109,7 +3671,7 @@ bool TomBasicCompiler::CompileLoop() {
 
         // If this is a precondition "do", fixup the jump around the "do" block
         if (top.m_type == FCT_DO_PRE) {
-            assert (top.m_jumpOut < m_vm.InstructionCount ());
+            assert ((unsigned)top.m_jumpOut < m_vm.InstructionCount ());
             m_vm.Instruction (top.m_jumpOut).m_value.IntVal () = m_vm.InstructionCount ();
         }
 
@@ -3117,3 +3679,962 @@ bool TomBasicCompiler::CompileLoop() {
         return true;
     }
 }
+
+bool TomBasicCompiler::CompileUserFunctionFwdDecl() {
+
+    // Skip "declare"
+    if (!GetToken())
+        return false;
+
+    // Look for "sub" or "function"
+    return CompileUserFunction(UFT_FWDDECLARATION);
+}
+
+bool TomBasicCompiler::CompileUserFunctionRuntimeDecl() {
+
+    // Skip "runtime"
+    if (!GetToken())
+        return false;
+
+    return CompileUserFunction(UFT_RUNTIMEDECLARATION);
+}
+
+bool TomBasicCompiler::CompileUserFunction(compUserFunctionType funcType) {
+
+    // Function or sub?
+    bool hasReturnVal;
+    if (m_token.m_text == "function")
+        hasReturnVal = true;
+    else if (m_token.m_text == "sub")
+        hasReturnVal = false;
+    else {
+        SetError("Expected 'sub' or 'function'");
+        return false;
+    }
+
+    // Check that we are not already inside a function
+    if (m_inFunction) {
+        SetError("Cannot define a function or subroutine inside another function or subroutine");
+        return false;
+    }
+
+    // Check that we are not inside a control structure
+    if (!CheckUnclosedFlowControl())
+        return false;
+
+    // Mark start of function in source code
+    m_functionStart.m_sourceLine = m_parser.Line();
+    m_functionStart.m_sourceCol = m_parser.Col();
+
+    // Skip "func"
+    if (!GetToken())
+        return false;
+
+    // Compile data type
+    compTokenType tokenType;
+    vmValType type = VTP_UNDEFINED;
+    std::string name = "";
+    if (hasReturnVal) {
+        if (!CompileDataType(name, type, tokenType))
+            return false;
+    }
+    else {
+        if (!CompileTokenName(name, tokenType, false))
+            return false;
+    }
+
+    // Validate function name
+    if (tokenType != CTT_TEXT && tokenType != CTT_USER_FUNCTION && tokenType != CTT_RUNTIME_FUNCTION) {
+        if (tokenType == CTT_FUNCTION)
+            SetError((std::string)"'" + name + "' has already been used as a built-in function/subroutine name");
+        else
+            SetError("Expected a function/subroutine name");
+        return false;
+    }
+
+    // Must not be a variable name
+    if (m_vm.Variables().GetVar(name) >= 0) {
+        SetError((std::string)"'" + name + "' has already been used as a variable name");
+        return false;
+    }
+
+    // Must not be a structure name
+    if (m_vm.DataTypes().GetStruc(name) >= 0) {
+        SetError((std::string)"'" + name + "' has already been used as a structure name");
+        return false;
+    }
+
+    // Allocate a new user function
+    m_userFuncPrototype.Reset();
+
+    // Expect "("
+    if (m_token.m_text != "(") {
+        SetError ("Expected '('");
+        return false;
+    }
+    if (!GetToken())
+        return false;
+
+    // Look for function parameters
+    if (m_token.m_text != ")") {
+        if (!CompileDim(false, true))
+            return false;
+    }
+
+    // Expect ")"
+    if (m_token.m_text != ")") {
+        SetError ("Expected ')'");
+        return false;
+    }
+    if (!GetToken())
+        return false;
+
+    // Calculate final return value
+    if (hasReturnVal) {
+
+        // Any trailing () denote an array
+        while (m_token.m_text == "(") {
+
+            // Room for one more dimension?
+            if (type.m_arrayLevel >= VM_MAXDIMENSIONS) {
+                SetError ((std::string) "Arrays cannot have more than " + IntToString (VM_MAXDIMENSIONS) + " dimensions.");
+                return false;
+            }
+
+            // Add dimension
+            type.m_arrayLevel++;
+
+            if (!GetToken ())           // Skip "("
+                return false;
+
+            // Expect ")"
+            if (m_token.m_text != ")") {
+                SetError("')' expected");
+                return false;
+            }
+            if (!GetToken())
+                return false;
+        }
+
+        // "as" keyword (QBasic/FreeBasic compatibility)
+        if (m_token.m_text == "as") {
+            if (!CompileAs(name, type))
+                return false;
+        }
+
+        // Default basic type to int if undefined
+        if (type.m_basicType == VTP_UNDEFINED)
+            type.m_basicType = VTP_INT;
+
+        // Store function return value type
+        m_userFuncPrototype.hasReturnVal = true;
+        m_userFuncPrototype.returnValType = type;
+    }
+    else
+        m_userFuncPrototype.hasReturnVal = false;
+
+    // Store function, and get its index (in m_currentFunction)
+    std::vector<vmUserFunc>& functions = m_vm.UserFunctions();
+    std::vector<vmUserFuncPrototype>& prototypes = m_vm.UserFunctionPrototypes();
+
+    if (funcType == UFT_FWDDECLARATION) {
+        // Forward declaration.
+
+        // Function name must not already have been used
+        if (IsLocalUserFunction(name)) {
+            SetError((std::string)"'" + name + "' has already been used as a function/subroutine name");
+            return false;
+        }
+
+        // Function name must not have been used for a runtime function
+        if (IsRuntimeFunction(name)) {
+            SetError((std::string)"'" + name + "' has already been used as a runtime function/subroutine name");
+            return false;
+        }
+
+        // Allocate new function
+        prototypes.push_back(m_userFuncPrototype);
+        functions.push_back(vmUserFunc(prototypes.size() - 1, false));
+        m_currentFunction = functions.size() - 1;
+
+        // Map name to function
+        m_localUserFunctionIndex[name]   = m_currentFunction;
+        m_visibleUserFunctionIndex[name] = m_currentFunction;
+        if (!IsGlobalUserFunction(name))
+            m_globalUserFunctionIndex[name] = m_currentFunction;
+
+        // Build reverse index (for debugger)
+        m_userFunctionReverseIndex[m_currentFunction] = name;
+    }
+    else if (funcType == UFT_RUNTIMEDECLARATION) {
+
+        // Function name must not already have been used
+        if (IsLocalUserFunction(name)) {
+            SetError((std::string)"'" + name + "' has already been used as a function/subroutine name");
+            return false;
+        }
+
+        // Function name must not have been used for a runtime function
+        if (IsRuntimeFunction(name)) {
+            SetError((std::string)"'" + name + "' has already been used as a runtime function/subroutine name");
+            return false;
+        }
+
+        // Store prototype
+        prototypes.push_back(m_userFuncPrototype);
+
+        // Store runtime function
+        m_runtimeFunctions.push_back(compRuntimeFunction(prototypes.size() - 1));
+
+        // Map name to runtime function
+        m_runtimeFunctionIndex[name] = m_runtimeFunctions.size() - 1;
+    }
+    else if (funcType == UFT_IMPLEMENTATION) {
+
+        // Function implementation
+
+        // Create jump-past-function op-code
+        m_functionJumpOver = m_vm.InstructionCount();
+        AddInstruction(OP_JUMP, VTP_INT, vmValue(0));   // Jump target will be fixed up when "endfunction" is compiled
+
+        if (IsRuntimeFunction(name)) {
+
+            // Implementation of runtime function
+            int index = m_runtimeFunctionIndex[name];
+            vmRuntimeFunction& runtimeFunction = m_vm.CurrentCodeBlock().GetRuntimeFunction(index);
+
+            // Check if already implemented
+            if (runtimeFunction.functionIndex >= 0) {
+                SetError((std::string)"Runtime function/sub '" + name + "' has already been implemented");
+                return false;
+            }
+
+            // Function must match runtime prototype
+            if (!m_userFuncPrototype.Matches(prototypes[m_runtimeFunctions[index].prototypeIndex])) {
+                SetError((std::string)"Function/sub does not match its RUNTIME declaration");
+                return false;  
+            }
+
+            // Allocate new function
+            prototypes.push_back(m_userFuncPrototype);
+            functions.push_back(vmUserFunc(prototypes.size() - 1, true, m_vm.InstructionCount()));
+            m_currentFunction = functions.size() - 1;
+
+            // Map runtime function to implementation
+            runtimeFunction.functionIndex = m_currentFunction;
+        }
+        else {
+            if (IsLocalUserFunction(name)) {
+
+                // Function already DECLAREd.
+                m_currentFunction = m_localUserFunctionIndex[name];
+
+                // Must not be already implemented
+                if (functions[m_currentFunction].implemented) {
+                    SetError((std::string)"'" + name + "' has already been used as a function/subroutine name");
+                    return false;
+                }
+
+                // Function prototypes must match
+                if (!m_userFuncPrototype.Matches(prototypes[functions[m_currentFunction].prototypeIndex])) {
+                    SetError((std::string)"Function/subroutine does not match how it was DECLAREd");
+                    return false;
+                }
+
+                // Save updated function spec
+                // Function starts at next offset
+                functions[m_currentFunction].implemented = true;
+                functions[m_currentFunction].programOffset = m_vm.InstructionCount();
+            }
+            else {
+
+                // Completely new function
+
+                // Allocate a new prototype
+                prototypes.push_back(m_userFuncPrototype);
+
+                // Allocate a new function
+                functions.push_back(vmUserFunc(prototypes.size() - 1, true, m_vm.InstructionCount()));
+                m_currentFunction = functions.size() - 1;
+            }
+            
+            // Map name to function
+            m_localUserFunctionIndex[name]   = m_currentFunction;
+            m_visibleUserFunctionIndex[name] = m_currentFunction;
+            if (!IsGlobalUserFunction(name))
+                m_globalUserFunctionIndex[name] = m_currentFunction;
+        }
+
+        // Build reverse index (for debugger)
+        m_userFunctionReverseIndex[m_currentFunction] = name;
+
+        // Compile the body of the function
+        m_inFunction = true;
+    }
+
+
+    /*if (funcType == UFT_FWDDECLARATION || funcType == UFT_IMPLEMENTATION) {
+        if (funcType == UFT_FWDDECLARATION) {
+
+            // Forward declaration.
+
+            // Function name must not already have been used
+            if (IsLocalUserFunction(name)) {
+                SetError((std::string)"'" + name + "' has already been used as a function/subroutine name");
+                return false;
+            }
+
+            // Function name must not have been used for a runtime function
+            if (IsRuntimeFunction(name)) {
+                SetError((std::string)"'" + name + "' has already been used as a runtime function/subroutine name");
+                return false;
+            }
+
+            // Allocate new function
+            prototypes.push_back(m_userFuncPrototype);
+            functions.push_back(vmUserFunc(prototypes.size() - 1, false));
+            m_currentFunction = functions.size() - 1;
+        }
+        else if (funcType == UFT_IMPLEMENTATION) {
+
+            // Create jump-past-function op-code
+            m_functionJumpOver = m_vm.InstructionCount();
+            AddInstruction(OP_JUMP, VTP_INT, vmValue(0));   // Jump target will be fixed up when "endfunction" is compiled
+
+            // Not a forward declaration
+            if (IsLocalUserFunction(name)) {
+
+                // Function already exists. This is allowed if the function was
+                // forward declared. Otherwise it is an error.
+                m_currentFunction = m_localUserFunctionIndex[name];
+
+                // Must not be already implemented
+                if (functions[m_currentFunction].implemented) {
+                    SetError((std::string)"'" + name + "' has already been used as a function/subroutine name");
+                    return false;
+                }
+
+                // Function prototypes must match
+                if (!m_userFuncPrototype.Matches(prototypes[functions[m_currentFunction].prototypeIndex])) {
+                    SetError((std::string)"Function/subroutine does not match how it was DECLAREd");
+                    return false;
+                }
+
+                // Save updated function spec
+                // Function starts at next offset
+                functions[m_currentFunction].implemented = true;
+                functions[m_currentFunction].programOffset = m_vm.InstructionCount();
+            }
+            else if (IsRuntimeFunction(name)) {
+
+                // Implementation of runtime function
+                int runtimeIndex = m_runtimeFunctionIndex[name];
+
+                // Note: We already know it is not already implemented, as the
+                // IsUserFunction(name) check (above) returned false.
+
+                // Check that the function prototype matches the runtime one
+                if (!m_userFuncPrototype.Matches(prototypes[m_runtimeFunctions[runtimeIndex].prototypeIndex])) {
+                    SetError((std::string)"Function/subroutine does not its the RUNTIME declaration");
+                    return false;
+                }
+
+                // Allocate new function
+                prototypes.push_back(m_userFuncPrototype);
+                functions.push_back(vmUserFunc(prototypes.size() - 1, true, m_vm.InstructionCount()));
+                m_currentFunction = functions.size() - 1;
+
+                // Link up runtime function for current code block
+                m_vm.CurrentCodeBlock().GetRuntimeFunction(runtimeIndex).functionIndex = m_currentFunction;
+            }
+            else {
+
+                // No existing declaration
+                // Allocate new function
+                prototypes.push_back(m_userFuncPrototype);
+                functions.push_back(vmUserFunc(prototypes.size() - 1, true, m_vm.InstructionCount()));
+                m_currentFunction = functions.size() - 1;
+            }
+
+            // Compile the body of the function
+            m_inFunction = true;
+        }
+
+        // Map name to function
+        m_localUserFunctionIndex[name]   = m_currentFunction;
+        m_visibleUserFunctionIndex[name] = m_currentFunction;
+        if (!IsGlobalUserFunction(name))
+            m_globalUserFunctionIndex[name] = m_currentFunction;
+
+        // Build reverse index (for debugger)
+        m_userFunctionReverseIndex[m_currentFunction] = name;
+    }
+    else if (funcType == UFT_RUNTIMEDECLARATION) {
+
+        // Name must not have already been used
+        if (IsLocalUserFunction(name) || IsRuntimeFunction(name)) {
+            SetError((std::string)"'" + name + "' has already been used as a function/subroutine name");
+            return false;
+        }
+
+        // Store prototype
+        prototypes.push_back(m_userFuncPrototype);
+
+        // Store runtime function
+        m_runtimeFunctions.push_back(compRuntimeFunction(prototypes.size() - 1));
+
+        // Map name to runtime function
+        m_runtimeFunctionIndex[name] = m_runtimeFunctions.size() - 1;
+    }*/
+
+    return true;
+}
+
+bool TomBasicCompiler::CompileEndUserFunction(bool hasReturnVal) {
+
+    // Must be inside a function
+    if (!m_inFunction) {
+        if (hasReturnVal)   SetError("'endfunction' without 'function'");
+        else                SetError("'endsub' without 'sub'");
+        return false;
+    }
+
+    // Match end sub/function against sub/function type
+    if (UserPrototype().hasReturnVal != hasReturnVal) {
+        if (hasReturnVal)   SetError("'endfunction' without 'function'");
+        else                SetError("'endsub' without 'sub'");
+        return false;
+    }
+
+    // Check for unclosed flow controls
+    if (!CheckUnclosedFlowControl())
+        return false;
+
+    // Skip 'endfunction'
+    if (!GetToken())
+        return false;
+
+    // If end of function is reached without a return value, need to trigger
+    // a runtime error.
+    if (UserPrototype().hasReturnVal)
+        AddInstruction(OP_NO_VALUE_RETURNED, VTP_INT, vmValue(0));
+    else
+        // Add return-from-user-function instruction
+        AddInstruction(OP_RETURN_USER_FUNC, VTP_INT, vmValue(0));
+
+    // Fix up jump-past-function op-code
+    assert((unsigned)m_functionJumpOver < m_vm.InstructionCount ());
+    m_vm.Instruction(m_functionJumpOver).m_value.IntVal() = m_vm.InstructionCount();
+
+    // Let compiler know we have left the function
+    m_inFunction = false;
+
+    // TODO: If function is supposed to return a value, add an op-code that triggers
+    // a run-time error (meaning that the end of the function was reached without
+    // finding a "return" command).
+
+    return true;
+}
+
+bool TomBasicCompiler::CompileUserFunctionCall(bool mustReturnValue, bool isRuntimeFunc) {
+    assert(
+        (!isRuntimeFunc && m_token.m_type == CTT_USER_FUNCTION) ||
+        ( isRuntimeFunc && m_token.m_type == CTT_RUNTIME_FUNCTION) );
+    assert(
+        (!isRuntimeFunc && IsUserFunction(m_token.m_text)) ||
+        ( isRuntimeFunc && IsRuntimeFunction(m_token.m_text)) );
+
+    // Read function name
+    std::string name = m_token.m_text;
+    if (!GetToken())
+        return false;
+
+    // Lookup prototype
+    int index;
+    int prototypeIndex;
+    if (isRuntimeFunc) {
+        index = m_runtimeFunctionIndex[name];
+        prototypeIndex = m_runtimeFunctions[index].prototypeIndex;
+    }
+    else {
+        index = m_visibleUserFunctionIndex[name];
+        prototypeIndex = m_vm.UserFunctions()[index].prototypeIndex;
+    }
+    vmUserFuncPrototype& prototype = m_vm.UserFunctionPrototypes()[prototypeIndex];
+
+    if (mustReturnValue && !prototype.hasReturnVal) {
+        SetError((std::string) "'" + name + "' does not return a value");
+        return false;
+    }
+
+    // Add op-code to prepare function stack frame.
+    // Stack frame remains inactive while evaluating its parameters.
+    if (isRuntimeFunc)
+        AddInstruction(OP_CREATE_RUNTIME_FRAME, VTP_INT, vmValue(index));
+    else
+        AddInstruction(OP_CREATE_USER_FRAME, VTP_INT, vmValue(index));
+
+    // Expect "("
+    if (m_token.m_text != "(") {
+        SetError ("Expected '('");
+        return false;
+    }
+    if (!GetToken())
+        return false;
+
+    // Evaluate function parameters
+    bool needComma = false;
+    for (int i = 0; i < prototype.paramCount; i++) {
+        if (needComma) {
+            if (m_token.m_text != ",") {
+                SetError("Expected ','");
+                return false;
+            }
+            if (!GetToken())
+                return false;
+        }
+        needComma = true;
+
+        if (!CompileUserFuncParam(prototype, i))
+            return false;
+    }
+
+    // Expect ")"
+    if (m_token.m_text != ")") {
+        SetError ("Expected ')'");
+        return false;
+    }
+    if (!GetToken())
+        return false;
+
+    // Add op-code to call function.
+    // Type: Unused.
+    // Value: index of function specification.
+    AddInstruction(OP_CALL_USER_FUNC, VTP_INT, vmValue());
+
+    if (prototype.hasReturnVal) {
+
+        // Data containing strings will need to be "destroyed" when the stack unwinds.
+        if (!prototype.returnValType.CanStoreInRegister() &&
+                m_vm.DataTypes().ContainsString(prototype.returnValType))
+            AddInstruction(OP_REG_DESTRUCTOR, VTP_INT, vmValue((vmInt)m_vm.StoreType(prototype.returnValType)));
+
+        // Set register type to value returned from function (if applies)
+        m_regType = prototype.returnValType.RegisterType();
+        if (!CompileDataLookup (false))
+            return false;
+
+        // If function returns a value larger than the register, temp data will
+        // need to be freed.
+        if (!prototype.returnValType.CanStoreInRegister()) {
+            m_freeTempData = true;
+        }
+    }
+
+    return true;
+}
+
+bool TomBasicCompiler::CompileUserFuncParam(vmUserFuncPrototype& prototype, int i) {
+
+    // Generate code to store result as a function parameter
+    vmValType& type = prototype.localVarTypes[i];
+
+    // Basic type case
+    if (type.IsBasic()) {
+
+        // Generate code to compile function parameter
+        if (!CompileExpression(false))
+            return false;
+
+        // Attempt to convert value in reg to same type
+        if (!CompileConvert(type.m_basicType)) {
+            SetError ("Types do not match");
+            return false;
+        }
+
+        // Save reg into parameter
+        AddInstruction (OP_SAVE_PARAM, type.m_basicType, vmValue(i));
+    }
+
+    // Pointer case. Parameter must be a pointer and m_reg must point to a value accessible through a variable.
+    else if (type.VirtualPointerLevel() == 1) {
+
+        // Special case: We accept "null" to pointer parameters
+        if (m_token.m_text == "null") {
+            if (!CompileNull())
+                return false;
+            AddInstruction(OP_SAVE_PARAM, VTP_INT, vmValue(i));
+        }
+        else {
+
+            // Otherwise we implicitly take the address of any variable passed in
+            if (!CompileLoadVar())
+                return false;
+
+            if (!CompileTakeAddress())
+                return false;
+
+            // Register should now match the expected type
+            if (    m_regType.m_pointerLevel == type.m_pointerLevel &&
+                    m_regType.m_arrayLevel == type.m_arrayLevel &&
+                    m_regType.m_basicType == type.m_basicType)
+                AddInstruction(OP_SAVE_PARAM, VTP_INT, vmValue(i));
+
+            else {
+                SetError("Types do not match");
+                return false;
+            }
+        }
+    }
+
+    // Not basic, and not a pointer.
+    // Must be a large object (structure or array)
+    else {
+        assert(type.m_pointerLevel == 0);
+
+        // Generate code to compile function parameter
+        if (!CompileExpression(false))
+            return false;
+
+        if (    m_regType.m_pointerLevel == 1 &&
+                m_regType.m_byRef &&
+                m_regType.m_arrayLevel == type.m_arrayLevel &&
+                m_regType.m_basicType == type.m_basicType) {
+            AddInstruction(OP_COPY_USER_STACK, VTP_INT, vmValue((vmInt)m_vm.StoreType(type)));
+            AddInstruction(OP_SAVE_PARAM_PTR, VTP_INT, vmValue(i));
+        }
+        else {
+            SetError("Types do not match");
+            return false;
+        }
+    }
+
+    // Data containing strings will need to be "destroyed" when the stack unwinds.
+    if (m_vm.DataTypes().ContainsString(type))
+        AddInstruction(OP_REG_DESTRUCTOR, VTP_INT,  vmValue((vmInt)m_vm.StoreType(type)));
+
+    return true;
+}
+
+bool TomBasicCompiler::CompileReturn() {
+    if (!GetToken ())
+        return false;
+
+    if (m_inFunction) {
+        if (UserPrototype().hasReturnVal) {
+            vmValType type = UserPrototype().returnValType;
+
+            // Generate code to compile and return value
+            if (!CompileExpression())
+                return false;
+            if (!CompileConvert(type.RegisterType()))
+                return false;
+
+            // Basic values and pointers can be returned in the register
+            if (!type.CanStoreInRegister()) {
+
+                // Add instruction to move that data into temp data
+                AddInstruction(OP_MOVE_TEMP, VTP_INT, vmValue((vmInt)m_vm.StoreType(type)));
+
+                // Add return-from-function OP-code
+                // Note: The 0 in the instruction value indicates that temp
+                // data should NOT be freed on return (as we have just moved
+                // the return value there.)
+                AddInstruction(OP_RETURN_USER_FUNC, VTP_INT, vmValue(0));
+            }
+            else
+                // Add return-from-function OP-code
+                // Note: The 1 in the instruction value indicates that temp
+                // data should be freed on return.
+                AddInstruction(OP_RETURN_USER_FUNC, VTP_INT, vmValue(1));
+        }
+        else
+            AddInstruction(OP_RETURN_USER_FUNC, VTP_INT, vmValue(1));
+    }
+    else {
+        // Add "return from Gosub" op-code
+        AddInstruction (OP_RETURN, VTP_INT, vmValue ());
+    }
+
+    return true;
+}
+
+std::string TomBasicCompiler::GetUserFunctionName(int index) {
+    std::map<int,std::string>::iterator i = m_userFunctionReverseIndex.find(index);
+    return i == m_userFunctionReverseIndex.end() ? (std::string)"???" : i->second;
+}
+
+bool TomBasicCompiler::InternalCompileBindCode() {
+
+    // Evaluate code handle
+    if (!CompileExpression())
+        return false;
+
+    if (!CompileConvert(VTP_INT))
+        return false;
+
+    // Add bindcode op-code
+    AddInstruction(OP_BINDCODE, VTP_INT, vmValue());
+
+    return true;
+}
+
+bool TomBasicCompiler::CompileBindCode() {
+
+    // Skip "bindcode" keyword
+    if (!GetToken())
+        return false;
+
+    // Combine bind code
+    return InternalCompileBindCode();
+}
+
+bool TomBasicCompiler::CompileExec() {
+
+    // Skip "exec" keyword
+    if (!GetToken())
+        return false;
+
+    // Check if explicit code block specified
+    if (!AtSeparatorOrSpecial())
+        if (!InternalCompileBindCode())
+            return false;
+
+    // Add exec op-code
+    AddInstruction(OP_EXEC, VTP_INT, vmValue());
+
+    return true;
+}
+
+compRollbackPoint TomBasicCompiler::GetRollbackPoint() {
+    compRollbackPoint r;
+
+    // Get virtual machine rollback info
+    r.vmRollback = m_vm.GetRollbackPoint();
+
+    // Get compiler rollback info
+    r.runtimeFunctionCount = m_runtimeFunctions.size();
+
+    return r;
+}
+
+void TomBasicCompiler::Rollback(compRollbackPoint rollbackPoint) {
+
+    // Rollback virtual machine
+    m_vm.Rollback(rollbackPoint.vmRollback);
+
+    // Rollback compiler
+
+    // Remove new labels
+    // (We can detect these as any labels with an offset past the instruction
+    // count stored in the rollback).
+    compLabelMap::iterator i = m_labels.begin();
+    while (i != m_labels.end()) {
+        if (i->second.m_offset >= rollbackPoint.vmRollback.instructionCount) {
+
+            // This should compile, but doesn't: i = m_labels.erase(i);
+            // The following is a workaround.
+            compLabelMap::iterator temp = i;
+            i++;
+            m_labels.erase(temp);
+        }
+        else
+            i++;
+    }
+
+    // Remove global function name->index records
+    // (Can detect them as any global function with an invalid function index)
+    std::map<std::string,int>::iterator j = m_globalUserFunctionIndex.begin();
+    while (j != m_globalUserFunctionIndex.end()) {
+        if (j->second >= rollbackPoint.vmRollback.functionCount) {
+            std::map<std::string,int>::iterator temp = j;
+            j++;
+            m_globalUserFunctionIndex.erase(temp);
+        }
+        else
+            j++;
+    }
+
+    // Remove function index->name records (used for debugging)
+    std::map<int,std::string>::iterator k = m_userFunctionReverseIndex.begin();
+    while (k != m_userFunctionReverseIndex.end()) {
+        if (k->first >= rollbackPoint.vmRollback.functionCount) {
+            std::map<int,std::string>::iterator temp = k;
+            k++;
+            m_userFunctionReverseIndex.erase(temp);
+        }
+        else
+            k++;
+    }
+
+    // Remove runtime functions
+    m_runtimeFunctions.resize(rollbackPoint.runtimeFunctionCount);
+
+    std::map<std::string,int>::iterator l = m_runtimeFunctionIndex.begin();
+    while (l != m_runtimeFunctionIndex.end()) {
+        if (l->second >= rollbackPoint.runtimeFunctionCount) {
+            std::map<std::string,int>::iterator temp = l;
+            l++;
+            m_runtimeFunctionIndex.erase(temp);
+        }
+        else
+            l++;
+    }
+}
+
+#ifdef VM_STATE_STREAMING
+void TomBasicCompiler::StreamOut(std::ostream& stream) {
+#ifdef STREAM_NAMES
+
+    // Stream out VM state
+    m_vm.StreamOut(stream);
+    
+    // Stream out constants
+    std::string name;
+    for (
+        compConstantMap::iterator iConst = m_programConstants.begin();
+        iConst != m_programConstants.end();
+        iConst++) {
+        std::string name = iConst->first;
+        WriteString(stream, name);
+        iConst->second.StreamOut(stream);
+    }
+    name = "";
+    WriteString(stream, name);
+
+    // Stream out labels
+    for (
+        compLabelMap::iterator iLabel = m_labels.begin();
+        iLabel != m_labels.end();
+        iLabel++) {
+        std::string name = iLabel->first;
+        WriteString(stream, name);
+        iLabel->second.StreamOut(stream);
+    }
+    name = "";
+    WriteString(stream, name);
+
+    // Stream out user function/subroutine names
+    for (   std::map<std::string,int>::iterator i = m_globalUserFunctionIndex.begin();
+            i != m_globalUserFunctionIndex.end();
+            i++) {
+        std::string name = i->first;
+        WriteString(stream, name);
+        WriteLong(stream, i->second);
+    }
+    name = "";
+    WriteString(stream, name);
+
+    // Stream out runtime functions
+    // Note that strictly speaking these aren't "names", but because they are
+    // required when name information is present, and not required when it is
+    // absent, we are bundling them into the same #ifdef
+    WriteLong(stream, m_runtimeFunctions.size());
+    for (int i = 0; i < m_runtimeFunctions.size(); i++)
+        m_runtimeFunctions[i].StreamOut(stream);
+
+    // Stream out runtime function names
+    for(    std::map<std::string,int>::iterator i = m_runtimeFunctionIndex.begin();
+            i != m_runtimeFunctionIndex.end();
+            i++) {
+        std::string name = i->first;
+        WriteString(stream, name);
+        WriteLong(stream, i->second);
+    }
+    name = "";
+    WriteString(stream, name);
+
+#endif
+//    compConstantMap         m_programConstants;
+//    compLabelMap            m_labels;
+//    compLabelIndex          m_labelIndex;
+}
+bool TomBasicCompiler::StreamIn(std::istream& stream) {
+#ifdef STREAM_NAMES
+
+    // Unload any plugins
+    m_plugins.Clear();
+
+    // Clear current program (if any)
+    New();
+
+    // Stream in VM state
+    if (!m_vm.StreamIn(stream)) {
+        SetError(m_vm.GetError());
+        return false;
+    }
+
+    // Stream in constant names
+    std::string name = ReadString(stream);
+    while (name != "") {
+
+        // Read constant details
+        compConstant constant;
+        constant.StreamIn(stream);
+
+        // Store constant
+        m_programConstants[name] = constant;
+
+        // Next constant
+        name = ReadString(stream);
+    }
+
+    // Stream in label names
+    name = ReadString(stream);
+    while (name != "") {
+
+        // Read label details
+        compLabel label;
+        label.StreamIn(stream);
+
+        // Store label
+        m_labels[name] = label;
+        m_labelIndex[label.m_offset] = name;
+        
+        // Next label
+        name = ReadString(stream);
+    }
+
+    // Stream in user function/subroutine names
+    name = ReadString(stream);
+    while (name != "") {
+
+        // Read function details
+        int index = ReadLong(stream);
+
+        // Store function index
+        m_globalUserFunctionIndex[name] = index;
+
+        // Next function
+        name = ReadString(stream);
+    }
+
+    // Stream in runtime functions
+    // Note that strictly speaking these aren't "names", but because they are
+    // required when name information is present, and not required when it is
+    // absent, we are bundling them into the same #ifdef
+    int count = ReadLong(stream);
+    m_runtimeFunctions.resize(count);
+    for (int i = 0; i < count; i++)
+        m_runtimeFunctions[i].StreamIn(stream);
+
+    name = ReadString(stream);
+    while (name != "") {
+
+        // Read runtime function details
+        int index = ReadLong(stream);
+
+        // Store runtime function index
+        m_runtimeFunctionIndex[name] = index;
+
+        // Next function
+        name = ReadString(stream);
+    }
+
+    return true;
+#endif
+}
+#endif
+
+
+
