@@ -1,9 +1,9 @@
 //---------------------------------------------------------------------------
 /*  Created 5-Sep-2003: Thomas Mulgrew
 
-    Basic types and constants for TomVM virtual machine v 2
+    Basic types and constants for TomVM virtual machine v 2              
 
-    Notes:
+    Notes:                                                  
 
         Basic4GL's basic type is a 4 bytes, which can store either:
             * An integer
@@ -33,10 +33,8 @@
 #include <sstream>
 #include <assert.h>
 #include <math.h>
-//#include "streaming.h"
-#ifndef _MSC_VER
-    #include <mem.h>
-#endif
+#include "streaming.h"
+
 
 // Constants
 #define VM_MAXDIMENSIONS 10         // Maximum dimensions in an array
@@ -45,6 +43,8 @@
 typedef std::string     vmString;
 typedef int             vmInt;
 typedef float           vmReal;
+#define vmRealIsFloat
+//#define vmRealIsDouble
 
 // Other internal types
 typedef bool            vmBool;
@@ -89,9 +89,20 @@ inline std::string RealToString (vmReal r) {
     return s.str ();
 }
 
-inline vmInt StringToInt (std::string& s)   {
+inline vmInt StringToInt (std::string& s) {
     vmInt i;
-    std::stringstream (s) >> i;
+
+    // Check if it's a hex string
+    std::string s2 = s.substr(0, 2);
+    std::string s3 = s.substr(0, 3);
+    if (s2 == "0x" || s2 == "0X")
+        std::stringstream(s.substr(2)) >> std::hex >> i;        // Strip 0x and parse as hex
+    else if (s3 == "-0x" || s3 == "-0X") {
+        std::stringstream(s.substr(3)) >> std::hex >> i;        // Strip -0x and parse as hex
+        i = -i;                                                 // Then negate
+    }
+    else
+        std::stringstream(s) >> i;                              // Parse as regular string
     return i;
 }
 
@@ -164,6 +175,8 @@ public:
     void AddDimension (unsigned int elements);
     unsigned int ArraySize (unsigned int elementSize) const;
     bool ArraySizeBiggerThan (unsigned int size, unsigned int elementSize);
+    bool CanStoreInRegister();
+    vmValType RegisterType();
 
     vmBasicValType StoredType () {
 
@@ -227,14 +240,16 @@ struct vmStructure {
     int         m_dataSize;             // Size of data
     bool        m_containsString;       // Contains one or more strings. (Requires special handling when copying data.)
     bool        m_containsArray;        // Contains one or more arrays.  (Requires special handling when allocating data.)
+    bool        m_containsPointer;      // Contains one or more pointers. (Requires pointer validity checking when copying data.)
 
-    vmStructure (std::string& name, int firstField = 0) {
+    vmStructure (std::string& name = (std::string&) "", int firstField = 0) {
         m_name          = LowerCase (name);
         m_firstField    = firstField;
         m_fieldCount    = 0;
         m_dataSize      = 0;
         m_containsString    = false;
         m_containsArray     = false;
+        m_containsPointer   = false;
     }
 
 #ifdef VM_STATE_STREAMING
@@ -291,6 +306,19 @@ public:
                 && (    type.m_arrayLevel > 0                                                       // Can be an array
                     ||  (type.m_basicType >= 0 && m_structures [type.m_basicType].m_containsArray));// or a structure containing an array
     }
+    bool ContainsPointer(vmValType& type) {
+        assert(TypeValid(type));
+
+        // Type is a pointer?
+        if (type.m_pointerLevel > 0)
+            return true;
+
+        // Is a structure (or array of structures) containing a pointer?
+        if (type.m_basicType >= 0)
+            return m_structures[type.m_basicType].m_containsPointer;
+
+        return false;
+    }
 
     // Building structures
     vmStructure& CurrentStruc () {
@@ -298,7 +326,7 @@ public:
         return m_structures.back ();
     }
     vmStructureField& CurrentField () {
-        assert (m_fields.size () > CurrentStruc ().m_firstField);           // Current structure must have at least 1 field
+        assert (m_fields.size () > (unsigned)CurrentStruc().m_firstField);           // Current structure must have at least 1 field
         return m_fields.back ();
     }
     vmStructure& NewStruc (std::string& name) {                             // Create a new structure and make it current
@@ -323,19 +351,21 @@ public:
         assert (!type.m_byRef);
         assert (    type.m_pointerLevel > 0
                 ||  type.m_basicType < 0
-                ||  type.m_basicType + 1 < m_structures.size ());
+                ||  (unsigned)type.m_basicType + 1 < m_structures.size ());
 
         // Create new field
         m_fields.push_back (vmStructureField (name, type, CurrentStruc ().m_dataSize));
-        CurrentStruc ().m_fieldCount++;
-        CurrentStruc ().m_dataSize += DataSize (CurrentField ().m_type);
+        CurrentStruc().m_fieldCount++;
+        CurrentStruc().m_dataSize += DataSize(CurrentField().m_type);
 
         // Update current structure statistics
-        CurrentStruc ().m_containsString    = CurrentStruc ().m_containsString
-                                            || ContainsString (type);
-        CurrentStruc ().m_containsArray     = CurrentStruc ().m_containsArray
-                                            || ContainsArray (type);
-        return CurrentField ();
+        CurrentStruc().m_containsString     = CurrentStruc().m_containsString
+                                            || ContainsString(type);
+        CurrentStruc().m_containsArray      = CurrentStruc().m_containsArray
+                                            || ContainsArray(type);
+        CurrentStruc().m_containsPointer    = CurrentStruc().m_containsPointer
+                                            || ContainsPointer(type);
+        return CurrentField();
     }
 
     // Debugging/output
@@ -361,7 +391,7 @@ public:
     int GetIndex (vmValType& type);
     vmValType& GetValType (int index) {
         assert (index >= 0);
-        assert (index < m_types.size ());
+        assert ((unsigned)index < m_types.size ());
         return m_types [index];
     }
 

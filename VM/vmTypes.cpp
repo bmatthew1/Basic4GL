@@ -9,7 +9,7 @@
 
 #include "vmTypes.h"
 #include <sstream>
-#include "Misc.h"
+#include "misc.h"
 
 //---------------------------------------------------------------------------
 
@@ -176,7 +176,7 @@ void vmValType::StreamIn (std::istream& stream) {
 
 int vmTypeLibrary::GetStruc (std::string name) {
     name = LowerCase (name);
-    for (int i = 0; i < m_structures.size (); i++) {
+    for (unsigned int i = 0; i < m_structures.size (); i++) {
         if (m_structures [i].m_name == name)
             return i;
     }
@@ -189,7 +189,7 @@ int vmTypeLibrary::GetField (vmStructure& struc, std::string fieldName) {
             i < struc.m_firstField + struc.m_fieldCount;
             i++) {
         assert (i >= 0);
-        assert (i < m_fields.size ());
+        assert ((unsigned)i < m_fields.size ());
         if (m_fields [i].m_name == fieldName)
             return i;
     }
@@ -197,23 +197,22 @@ int vmTypeLibrary::GetField (vmStructure& struc, std::string fieldName) {
 }
  
 int vmTypeLibrary::DataSize (vmValType& type) {
-
-    // How big would a variable of type "type" be?
+	// How big would a variable of type "type" be?
     if (type.PhysicalPointerLevel () > 0)       // Pointers are always one element long
         return 1;
-
+	
     if (type.m_arrayLevel > 0)      {            // Calculate array size
-	vmValType vt(type.m_basicType);
+		vmValType vt(type.m_basicType);
         return type.ArraySize (DataSize (vt));
     }
-
+	
     if (type.m_basicType >= 0) {
-
+		
         // Structured type. Lookup and return size of structure.
         assert (type.m_basicType < m_structures.size ());
         return m_structures [type.m_basicType].m_dataSize;
     }
-
+	
     // Otherwise is basic type
     return 1;
 }
@@ -237,7 +236,7 @@ bool vmTypeLibrary::TypeValid (vmValType& type) {
 
     return      type.m_basicType >= VTP_INT
             &&  type.m_basicType != VTP_UNDEFINED
-            &&  (type.m_basicType < 0 || type.m_basicType < m_structures.size ())
+            &&  (type.m_basicType < 0 || (unsigned)type.m_basicType < m_structures.size ())
             &&  type.m_arrayLevel < VM_MAXDIMENSIONS;
 }
 
@@ -264,7 +263,7 @@ std::string vmTypeLibrary::DescribeVariable (std::string name, vmValType& type) 
     result += name;
 
     // Append array indices
-    for (i = 0; i < type.m_arrayLevel; i++) {
+    for (i = type.m_arrayLevel - 1; i >= 0; i--) {
         result += "(";
         if (type.VirtualPointerLevel () == 0)
             result += IntToString (type.m_arrayDims [i] - 1);
@@ -319,7 +318,7 @@ int vmValTypeSet::GetIndex (vmValType& type) {
     // If type is not present, create a new one and return an index to that.
 
     // Look for type
-    int i;
+    unsigned int i;
     for (i = 0; i < m_types.size (); i++)
         if (m_types [i].Equals (type))
             return i;
@@ -328,6 +327,35 @@ int vmValTypeSet::GetIndex (vmValType& type) {
     i = m_types.size ();
     m_types.push_back (type);
     return i;
+}
+
+bool vmValType::CanStoreInRegister() {
+    return m_pointerLevel > 0 ||                // Pointers fit in a register
+        (m_arrayLevel == 0 && m_basicType < 0); // Or single basic types
+}
+
+vmValType vmValType::RegisterType() {
+
+    // Return the actual type that will be stored in a register when referring
+    // to data of this type.
+    // For values that fit into a register, the register type is the same as
+    // the original type represented.
+    // For large values like structures and arrays, the register will store an
+    // implicit reference to the data instead.
+
+    // Copy this value type
+    vmValType result = *this;
+
+    // Check if type is an array or structure
+    if (!result.CanStoreInRegister()) {     
+
+        // A structure or array cannot fit into a register.
+        // What is stored is an implicit by-reference pointer.
+        result.m_pointerLevel++;
+        result.m_byRef = true;
+    } 
+
+    return result;
 }
 
 #ifdef VM_STATE_STREAMING

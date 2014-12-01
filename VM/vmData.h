@@ -82,6 +82,7 @@ public:
     int Alloc ();
     void Free (int index);
     void Clear ();
+    int StoredElements() { return m_array.size() - m_freeList.size(); }
 
     std::vector<T>&     Array ()        { return m_array; }
     std::vector<bool>&  ValAllocated () { return m_valAllocated; }
@@ -256,6 +257,8 @@ public:
             Remove (index);
         }
     }
+
+    vmStore<T>& Store() { return m_store; }
 };
 
 template<class T> void vmResourceStore<T>::Clear () {
@@ -293,15 +296,42 @@ template<class T> void vmPointerResourceStore<T>::DeleteElement (int index) {
 // A resizeable array of vmValue objects
 typedef std::vector<vmValue> vmValueArray;
 class vmData {
+
+    // Data layout (m_data array)
+    // -------------------------------------------------------------------------
+    // 0                    Reserved for null pointers
+    // -------------------------------------------------------------------------
+    // 1                    Temporary data (allocated during expression
+    // :                    evaluation. Grows downward)
+    // m_tempData - 1
+    // -------------------------------------------------------------------------
+    // m_tempData
+    // :                    Unused stack/temp space
+    // m_stackTop - 1
+    // -------------------------------------------------------------------------
+    // m_stackTop           Local variable/parameter stack space. Used by user
+    // :                    defined functions.
+    // m_permanent - 1
+    // -------------------------------------------------------------------------
+    // m_permanent
+    // :                    Permanent (global) variable storage
+    // size()-1
+    // -------------------------------------------------------------------------
+    //
+    // Stack overflow occurs when m_tempData > m_stackTop.
+    // Out of memory occurs when size() > m_maxDataSize.
     vmValueArray    m_data;
-    int             m_tempStart;            // All data below tempStart is permanent
-                                            // Any data between tempStart and Size() is temporary
+    int             m_tempData;
+    int             m_stackTop;
+    int             m_permanent;
     int             m_maxDataSize;
         // Maximum # of permanent data values that can be stored.
         // Note: Caller must be sure to call RoomFor before calling Allocate to
         // ensure there is room for the data.
-        // Limit is NOT enforced for AllocateTemp, as this data is small
-        // and temporary.
+
+    int m_tempDataLock;             // Temp data below this point will NOT be
+                                    // freed when FreeTempData is called.
+
     int InternalAllocate (int count) {
 
         // Allocate "count" elements and return iterator pointing to first one
@@ -312,72 +342,155 @@ class vmData {
     }
 
 public:
-    vmData (int maxDataSize) {
-        assert (maxDataSize > 0);
+    vmData (int maxDataSize, int stackSize) {
+        assert(stackSize > 1);
+        assert(maxDataSize > stackSize);
 
         // Ensure the maxDataSize is less than the maximum # elements supported
         // by the vector.
-        // We also subtract 1 meg to allow for temp data allocated after the
-        // permanent data.
-        if (maxDataSize > m_data.max_size () - 1048576)
-            maxDataSize = m_data.max_size () - 1048576;
+        if ((unsigned)maxDataSize > m_data.max_size())
+            maxDataSize = m_data.max_size();
+        assert(maxDataSize > stackSize);
+
+        // Initialize data
         m_maxDataSize = maxDataSize;
+        m_permanent = stackSize;
         Clear ();
     }
     vmValueArray& Data ()       { return m_data; }
     int MaxDataSize ()          { return m_maxDataSize; }
+    int Permanent()             { return m_permanent; }
+    int StackTop()              { return m_stackTop; }
+    int TempData()              { return m_tempData; }
+    int TempDataLock()          { return m_tempDataLock; }
 
     void Clear ()               {
-        m_data.clear ();
-        m_data.push_back (vmValue ());      // Allocate a 0th element, so that no "real" data is placed there.
-                                            // Thus we can use 0 as "null" for pointer types.
-        m_tempStart = -1;
+        // Clear existing data
+        m_data.clear();
+
+        // Allocate stack
+        m_data.resize(m_permanent, vmValue());
+
+        // Clear temp data
+        m_tempData = 1;
+        m_tempDataLock = 1;
+
+        // Clear stack
+        m_stackTop = m_permanent;
     }
     int Size ()                 { return m_data.size (); }
     bool IndexValid (int i)     { return i >= 0 && i < Size (); }
-    int Allocate (int count) {
-        assert (count > 0);
-        assert (RoomFor (count));
-
-        // Allocate permanent data
-        // (Free temp data first)
-        FreeTemp ();
-
-        // Allocate data
-        return InternalAllocate (count);
-    }
     void InitData (int i, vmValType& type, vmTypeLibrary& typeLib);             // Initialise a new block of data
+
+    // Permanent data
+    int Allocate (int count) {
+        assert(count >= 0);
+        assert(RoomFor(count));
+
+        // Allocate "count" elements and return iterator pointing to first one
+        int top = m_data.size();
+        if (count > 0)
+            m_data.resize(m_data.size() + count, vmValue());
+        return top;
+    }
     bool RoomFor (int count) {
-        assert (count > 0);
-        int free = MaxDataSize () - (m_tempStart >= 0 ? m_tempStart : Size ());
-        return free >= count;
+        assert(count >= 0);
+        return m_maxDataSize - m_data.size() >= (unsigned)count;
+    }
+
+    // Stack data
+    int AllocateStack(int count) {
+        assert(count >= 0);
+        assert(StackRoomFor(count));
+
+        // Allocate stack data (stack grows downward)
+        m_stackTop -= count;
+
+        // Initialize data
+        for (int i = 0; i < count; i++)
+            m_data[m_stackTop + i] = vmValue();
+
+        // Return index of start of data
+        return m_stackTop;
+    }
+    bool StackRoomFor(int count) {
+        assert(count >= 0);
+        return m_stackTop - m_tempData >= count;
     }
 
     // Temporary data
-    int AllocateTemp (int count) {
+    int AllocateTemp(int count, bool initData) {
+        assert(count >= 0);
+        assert(StackRoomFor(count));
 
-        // Set temp start marker
-        if (m_tempStart < 0)
-            m_tempStart = Size ();
+        // Mark temp data position
+        int top = m_tempData;
 
         // Allocate data
-        return InternalAllocate (count);
-    }
-    void FreeTemp () {
+        m_tempData += count;
 
-        // Free temporary data
-        if (m_tempStart >= 0 && m_tempStart < m_data.size ())
-            m_data.resize (m_tempStart);
-        m_tempStart = -1;
+        // Initialize data
+        if (initData)
+            for (int i = 0; i < count; i++)
+                m_data[top + i] = vmValue();
+
+        // Return index of start of data
+        return top;
     }
-    void GetState (unsigned int& size, unsigned int& tempStart) {
+
+    // Lock the current temporary data so that it will not be freed by
+    // FreeTempData(). Returns the previous lock point, which can be passed to
+    // UnlockTempData().
+    int LockTempData() {
+        int prev = m_tempDataLock;
+        m_tempDataLock = m_tempData;
+        return prev;
+    }
+
+    // Unlock temporary data to a previous lock point (presumably returned by
+    // LockTempData()
+    void UnlockTempData(int newLockPosition) {
+        assert(newLockPosition >= 1);
+        assert(newLockPosition <= m_tempDataLock);
+        m_tempDataLock = newLockPosition;
+    }
+
+    void FreeTemp() {
+        m_tempData = m_tempDataLock;
+    }
+
+    void SaveState(
+            int& stackTop,
+            int& tempDataLock) {
+        stackTop = m_stackTop;
+        tempDataLock = LockTempData();
+    }
+
+    void RestoreState(
+            int stackTop,
+            int tempDataLock,
+            bool freeTempData) {
+
+        // Restore stack
+        m_stackTop = stackTop;
+
+        // Free temp data used after state was saved
+        if (freeTempData)
+            FreeTemp();
+
+        // Unlock temp data from before save
+        UnlockTempData(tempDataLock);
+    }
+
+/*    void GetState(
+        unsigned int& size,
+        unsigned int& stackTop,
+        unsigned int& tempDataLock) {
 
         // Return state data
-        size        = m_data.size ();
-        tempStart   = m_tempStart;
-
-        // Set temp data as permanent for now.
-        m_tempStart = -1;
+        size            = m_data.size ();
+        stackTop        = m_stackTop;
+        tempDataLock    = LockTempData();
 
         // Note: This is used by debugging. The state is captured and preserved
         // while temporary code is executed (e.g. evaluating a watch expression).
@@ -390,11 +503,14 @@ public:
 
         // Restore top of data
         if (size < m_data.size ())
-            m_data.resize (size);
+            m_data.resize(size);
 
-        // Restore start of temp data
-        m_tempStart = tempStart;
-    }
+        // Restore stack
+        m_stackTop = stackTop;
+
+        // Free temp data used by
+
+    }*/
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -553,7 +669,7 @@ inline int TempArray (vmData& data, vmTypeLibrary& typeLib, vmBasicValType eleme
     type << arraySize;                                          // Set array size
 
     // Allocate temporary array
-    int dataIndex = data.AllocateTemp (typeLib.DataSize (type));
+    int dataIndex = data.AllocateTemp(typeLib.DataSize(type), true);
     data.InitData (dataIndex, type, typeLib);
     return dataIndex;
 }
@@ -595,7 +711,7 @@ inline int TempArray2D (vmData& data, vmTypeLibrary& typeLib, vmBasicValType ele
     type << arraySize1 << arraySize2;               // Set array size
 
     // Allocate temporary array
-    int dataIndex = data.AllocateTemp (typeLib.DataSize (type));
+    int dataIndex = data.AllocateTemp(typeLib.DataSize(type), true);
     data.InitData (dataIndex, type, typeLib);
     return dataIndex;
 }

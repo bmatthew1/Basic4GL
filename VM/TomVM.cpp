@@ -15,42 +15,58 @@
 #pragma package(smart_init)
 #endif
 
+// Constants
+std::string streamHeader = "Basic4GL stream";
+int         streamVersion = 2;
+
 const char *blankString = "";
 
-std::string streamHeader = "Basic4GL stream";
-int         streamVersion = 1;
+////////////////////////////////////////////////////////////////////////////////
+// Helper functions
+vmTempBreakPt MakeTempBreakPt(int offset) {
+    vmTempBreakPt breakPt;
+    breakPt.m_offset = offset;
+    return breakPt;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // TomVM
 
-TomVM::TomVM (int maxDataSize)
-        :   m_data              (maxDataSize),
+TomVM::TomVM (
+        int maxDataSize,
+        int maxStackSize)
+        :   m_data              (maxDataSize, maxStackSize),
             m_variables         (m_data, m_dataTypes),
             m_strings           (blankString),
             m_stack             (m_strings) {
+
+
     New ();
 }
 
 void TomVM::New () {
 
     // Clear variables, data and data types
-    Clr ();
-    m_variables.Clear ();
-    m_dataTypes.Clear ();
-    m_programData.clear ();
+    Clr();
+    m_variables.Clear();
+    m_dataTypes.Clear();
+    m_programData.clear();
+    m_codeBlocks.clear();
 
     // Clear string constants
-    m_stringConstants.clear ();
+    m_stringConstants.clear();
 
     // Deallocate code
-    m_code.clear ();
-    m_typeSet.Clear ();
+    m_code.clear();
+    m_typeSet.Clear();
+    m_userFunctions.clear();
+    m_userFunctionPrototypes.clear();
     m_ip = 0;
     m_paused = false;
 
     // Clear breakpoints
-    m_patchedBreakPts.clear ();
-    m_tempBreakPts.clear ();
+    m_patchedBreakPts.clear();
+    m_tempBreakPts.clear();
     m_breakPtsPatched = false;
 }
 
@@ -59,7 +75,11 @@ void TomVM::Clr () {
     m_data.Clear ();                    // Deallocate variable data
     m_strings.Clear ();                 // Clear strings
     m_stack.Clear ();                   // Clear runtime stacks
-    m_callStack.clear ();
+    m_userCallStack.clear();
+    m_stackDestructors.clear();
+    m_tempDestructors.clear();
+    m_currentUserFrame = -1;
+    m_boundCodeBlock = 0;
 
     // Clear resources
     ClearResources ();
@@ -90,7 +110,7 @@ void TomVM::Reset () {
     Clr ();
 
     // Call registered initialisation functions
-    for (int i = 0; i < m_initFunctions.size (); i++)
+    for (unsigned int i = 0; i < m_initFunctions.size (); i++)
         m_initFunctions [i] (*this);
 
     // Move to start of program
@@ -98,7 +118,7 @@ void TomVM::Reset () {
     m_paused = false;
 }
 
-char    *ErrNotImplemented          = "Opcode not implemented",
+const char    *ErrNotImplemented          = "Opcode not implemented",
         *ErrInvalid                 = "Invalid opcode",
         *ErrUnDIMmedVariable        = "UnDIMmed variable",
         *ErrBadArrayIndex           = "Array index out of range",
@@ -114,7 +134,13 @@ char    *ErrNotImplemented          = "Opcode not implemented",
         *ErrArraySizeMismatch       = "Array sizes are different",
         *ErrZeroLengthArray         = "Array size must be 0 or greater",
         *ErrOutOfData               = "Out of DATA",
-        *ErrDataIsString            = "Expected to READ a number, got a text string instead";
+        *ErrDataIsString            = "Expected to READ a number, got a text string instead",
+        *ErrRunCalledInsideExecute  = "Cannot execute RUN in dynamic code",
+        *ErrUserFuncStackOverflow   = "Ran out of function variable memory",
+        *ErrNoValueReturned         = "Function did not return a value",
+        *ErrPointerScopeError       = "Pointer scope error",
+        *ErrNoRuntimeFunction       = "Runtime function not implemented",
+        *ErrInvalidCodeBlock        = "Could not find runtime code to execute";
 
 void TomVM::Continue (unsigned int steps) {
     ClearError ();
@@ -149,7 +175,7 @@ step:
         // Load value
         if (instruction->m_type == VTP_STRING) {
             assert (instruction->m_value.IntVal () >= 0);
-            assert (instruction->m_value.IntVal () < m_stringConstants.size ());
+            assert ((unsigned)instruction->m_value.IntVal () < m_stringConstants.size ());
             RegString () = m_stringConstants [instruction->m_value.IntVal ()];
         }
         else
@@ -170,6 +196,27 @@ step:
         SetError (ErrUnDIMmedVariable);
         break;
     }
+
+    case OP_LOAD_LOCAL_VAR: {
+
+        // Find current stack frame
+        assert(m_currentUserFrame >= 0);
+        assert((unsigned)m_currentUserFrame < m_userCallStack.size());
+        vmUserFuncStackFrame& currentFrame = m_userCallStack[m_currentUserFrame];
+
+        // Find variable
+        int index = instruction->m_value.IntVal();
+
+        // Instruction contains index of variable.
+        if (currentFrame.localVarDataOffsets[index] != 0) {
+            // Load address of variable's data into register
+            m_reg.IntVal() = currentFrame.localVarDataOffsets[index];
+            goto nextStep;
+        }
+        SetError(ErrUnDIMmedVariable);
+        break;
+    }
+
     case OP_DEREF: {
 
         // Dereference reg.
@@ -300,12 +347,57 @@ step:
         var.Allocate (m_data, m_dataTypes);
         goto nextStep;
     }
+    case OP_DECLARE_LOCAL: {
 
+        // Allocate local variable
+
+        // Find current stack frame
+        assert(m_currentUserFrame >= 0);
+        assert((unsigned)m_currentUserFrame < m_userCallStack.size());
+        vmUserFuncStackFrame& currentFrame = m_userCallStack[m_currentUserFrame];
+        vmUserFunc& userFunc = m_userFunctions[currentFrame.userFuncIndex];
+        vmUserFuncPrototype& prototype = m_userFunctionPrototypes[userFunc.prototypeIndex];
+
+        // Find variable type
+        int index = instruction->m_value.IntVal();
+        assert(index >= 0);
+        assert((unsigned)index < prototype.localVarTypes.size());
+        vmValType& type = prototype.localVarTypes[index];
+
+        // Must not already be allocated
+        if (currentFrame.localVarDataOffsets[index] != 0) {
+            SetError (ErrReDIMmedVariable);
+            break;
+        }
+
+        // Pop and validate array dimensions sizes into type (if applicable)
+        if (type.PhysicalPointerLevel() == 0 && !PopArrayDimensions(type))
+            break;
+
+        // Validate type size
+        if (!ValidateTypeSizeForStack(type))
+            break;
+
+        // Allocate new data
+        int dataIndex = m_data.AllocateStack(m_dataTypes.DataSize(type));
+
+        // Initialise it
+        m_data.InitData(dataIndex, type, m_dataTypes);
+
+        // Store data index in stack frame
+        currentFrame.localVarDataOffsets[index] = dataIndex;
+
+        // Also store in register, so that OP_REG_DESTRUCTOR can be used
+        m_reg.IntVal() = dataIndex;
+
+        goto nextStep;
+
+    }
     case OP_JUMP:
 
         // Jump
         assert (instruction->m_value.IntVal () >= 0);
-        assert (instruction->m_value.IntVal () < m_code.size ());
+        assert ((unsigned)instruction->m_value.IntVal () < m_code.size ());
         m_ip = instruction->m_value.IntVal ();
         goto step;
 
@@ -313,7 +405,7 @@ step:
 
         // Jump if reg != 0
         assert (instruction->m_value.IntVal () >= 0);
-        assert (instruction->m_value.IntVal () < m_code.size ());
+        assert ((unsigned)instruction->m_value.IntVal () < m_code.size ());
         if (Reg ().IntVal () != 0) {
             m_ip = instruction->m_value.IntVal ();
             goto step;
@@ -324,7 +416,7 @@ step:
 
         // Jump if reg == 0
         assert (instruction->m_value.IntVal () >= 0);
-        assert (instruction->m_value.IntVal () < m_code.size ());
+        assert ((unsigned)instruction->m_value.IntVal () < m_code.size ());
         if (Reg ().IntVal () == 0) {
             m_ip = instruction->m_value.IntVal ();
             goto step;
@@ -504,7 +596,7 @@ step:
     case OP_CALL_FUNC:
 
         assert (instruction->m_value.IntVal () >= 0);
-        assert (instruction->m_value.IntVal () < m_functions.size ());
+        assert ((unsigned)instruction->m_value.IntVal () < m_functions.size ());
 
         // Call external function
         m_functions [instruction->m_value.IntVal ()] (*this);
@@ -515,7 +607,7 @@ step:
     case OP_CALL_OPERATOR_FUNC:
 
         assert (instruction->m_value.IntVal () >= 0);
-        assert (instruction->m_value.IntVal () < m_operatorFunctions.size ());
+        assert ((unsigned)instruction->m_value.IntVal () < m_operatorFunctions.size ());
 
         // Call external function
         m_operatorFunctions [instruction->m_value.IntVal ()] (*this);
@@ -528,7 +620,10 @@ step:
         break;                              // And return
 
     case OP_FREE_TEMP:
-        m_data.FreeTemp ();                 // Free temporary data
+
+        // Free temporary data
+        UnwindTemp();
+        m_data.FreeTemp();
         goto nextStep;
 
     case OP_ALLOC: {
@@ -545,27 +640,26 @@ step:
         // Allocate and initialise new data
         m_reg.IntVal() = m_data.Allocate (m_dataTypes.DataSize (type));
         m_data.InitData (m_reg.IntVal(), type, m_dataTypes);
-        
+
         goto nextStep;
     }
 
     case OP_CALL: {
 
-        // Call
+        // Call (GOSUB)
         assert (instruction->m_value.IntVal () >= 0);
-        assert (instruction->m_value.IntVal () < m_code.size ());
+        assert ((unsigned)instruction->m_value.IntVal () < m_code.size ());
 
         // Check for stack overflow
-        if (m_callStack.size () >= VM_MAXSTACKCALLS) {
-            SetError (ErrStackOverflow);
+        if (m_userCallStack.size () >= VM_MAXUSERSTACKCALLS) {
+            SetError(ErrStackOverflow);
             break;
         }
 
-        // Push return address
-        m_callStack.push_back (m_ip + 1);
-//        vmValue temp ((int) m_ip + 1);
-//        m_stack.Push (temp);
-//        m_stack.Push (vmValue ((int) m_ip + 1));
+        // Push stack frame, with return address
+        m_userCallStack.push_back(vmUserFuncStackFrame());
+        vmUserFuncStackFrame& stackFrame = m_userCallStack.back();
+        stackFrame.InitForGosub(m_ip + 1);
 
         // Jump to subroutine
         m_ip = instruction->m_value.IntVal ();
@@ -573,13 +667,18 @@ step:
     }
     case OP_RETURN:
 
+        // Return from GOSUB
+
         // Pop and validate return address
-        if (m_callStack.empty ()) {
+        if (m_userCallStack.empty ()) {
             SetError (ErrReturnWithoutGosub);
             break;
         }
-        tempI = m_callStack [m_callStack.size () - 1];
-        m_callStack.pop_back ();
+
+        assert(m_userCallStack.back().userFuncIndex == -1);     // -1 means GOSUB. Should be impossible to execute an OP_RETURN if stack top is not a GOSUB 
+
+        tempI = m_userCallStack.back().returnAddr;
+        m_userCallStack.pop_back ();
         if (tempI >= m_code.size ()) {
             SetError (ErrStackError);
             break;
@@ -588,6 +687,161 @@ step:
         // Jump to return address
         m_ip = tempI;
         goto step;
+
+    case OP_CREATE_USER_FRAME: {
+
+        // Check for stack overflow
+        if (m_userCallStack.size () >= VM_MAXUSERSTACKCALLS) {
+            SetError(ErrStackOverflow);
+            break;
+        }
+
+        // Create and initialize stack frame
+        int funcIndex = instruction->m_value.IntVal();
+        m_userCallStack.push_back(vmUserFuncStackFrame());
+        vmUserFuncStackFrame& stackFrame = m_userCallStack.back();
+        stackFrame.InitForUserFunction(
+            m_userFunctionPrototypes[m_userFunctions[funcIndex].prototypeIndex],
+            funcIndex);
+
+        // Save previous stack frame data
+        m_data.SaveState(stackFrame.prevStackTop, stackFrame.prevTempDataLock);
+
+        goto nextStep;
+    }
+
+    case OP_CREATE_RUNTIME_FRAME: {
+        assert(!m_codeBlocks.empty());
+
+        // Find function index
+        int funcIndex = -1;
+
+        // Look for function in bound code block
+        int runtimeIndex = instruction->m_value.IntVal();
+        if (m_boundCodeBlock > 0 && (unsigned)m_boundCodeBlock < m_codeBlocks.size()) {
+            vmCodeBlock& codeBlock = m_codeBlocks[m_boundCodeBlock];
+            if (codeBlock.programOffset >= 0)
+                funcIndex = codeBlock.GetRuntimeFunction(runtimeIndex).functionIndex;
+        }
+
+        // If not found, look in main program
+        if (funcIndex < 0)
+            funcIndex = m_codeBlocks[0].GetRuntimeFunction(runtimeIndex).functionIndex;
+
+        // No function => Runtime error
+        if (funcIndex < 0) {
+            SetError(ErrNoRuntimeFunction);
+            break;
+        }
+
+        // From here on the logic is the same as OP_CREATE_USER_FRAME
+        // Check for stack overflow
+        if (m_userCallStack.size () >= VM_MAXUSERSTACKCALLS) {
+            SetError(ErrStackOverflow);
+            break;
+        }
+
+        // Create and initialize stack frame
+        m_userCallStack.push_back(vmUserFuncStackFrame());
+        vmUserFuncStackFrame& stackFrame = m_userCallStack.back();
+        stackFrame.InitForUserFunction(
+            m_userFunctionPrototypes[m_userFunctions[funcIndex].prototypeIndex],
+            funcIndex);
+
+        // Save previous stack frame data
+        m_data.SaveState(stackFrame.prevStackTop, stackFrame.prevTempDataLock);
+
+        goto nextStep;
+    }
+
+    case OP_CALL_USER_FUNC: {
+
+        // Call user defined function
+        vmUserFuncStackFrame& stackFrame = m_userCallStack.back();
+        vmUserFunc& userFunc = m_userFunctions[stackFrame.userFuncIndex];
+
+        // Make active
+        stackFrame.prevCurrentFrame = m_currentUserFrame;
+        m_currentUserFrame = m_userCallStack.size() - 1;
+
+        // Call function
+        stackFrame.returnAddr = m_ip + 1;
+        m_ip = userFunc.programOffset;
+        goto step;
+    }
+
+    case OP_RETURN_USER_FUNC: {
+        assert(m_userCallStack.size() > 0);
+
+        // Find current stack frame
+        vmUserFuncStackFrame& stackFrame = m_userCallStack.back();
+        assert(stackFrame.userFuncIndex >= 0);
+
+        // Restore previous stack frame data
+        bool doFreeTempData = instruction->m_value.IntVal() == 1;
+        if (doFreeTempData)
+            UnwindTemp();
+        UnwindStack(stackFrame.prevStackTop);
+        m_data.RestoreState(
+                stackFrame.prevStackTop,
+                stackFrame.prevTempDataLock,
+                doFreeTempData);
+
+        // Return to return address
+        m_ip = stackFrame.returnAddr;
+
+        // Make previous frame active
+        m_currentUserFrame = stackFrame.prevCurrentFrame;
+
+        // Remove stack frame
+        m_userCallStack.pop_back();
+
+        goto step;
+    }
+
+    case OP_NO_VALUE_RETURNED:
+        SetError(ErrNoValueReturned);
+        break;
+
+    case OP_BINDCODE:
+        m_boundCodeBlock = m_reg.IntVal();
+        goto nextStep;
+
+    case OP_EXEC:
+
+        // Call runtime compiled code block.
+        // Call is like a GOSUB.
+        // RETURN will return back to the next op-code
+        if (m_boundCodeBlock > 0 && (unsigned)m_boundCodeBlock < m_codeBlocks.size()) {
+            vmCodeBlock& codeBlock = m_codeBlocks[m_boundCodeBlock];
+            if (codeBlock.programOffset >= 0) {
+
+                // From here the code is the same as OP_CALL
+                assert(codeBlock.programOffset >= 0);
+                assert((unsigned)codeBlock.programOffset < m_code.size ());
+
+                // Check for stack overflow
+                if (m_userCallStack.size () >= VM_MAXUSERSTACKCALLS) {
+                    SetError(ErrStackOverflow);
+                    break;
+                }
+
+                // Push stack frame, with return address
+                m_userCallStack.push_back(vmUserFuncStackFrame());
+                vmUserFuncStackFrame& stackFrame = m_userCallStack.back();
+                stackFrame.InitForGosub(m_ip + 1);
+
+                // Jump to subroutine
+                m_ip = codeBlock.programOffset;
+                goto step;
+            }
+        }
+
+        SetError(ErrInvalidCodeBlock);
+        break;
+
+    case OP_END_CALLBACK:
+        break;          // Timeshare break. Calling code will then detect this op-code has been reached
 
     case OP_DATA_READ:
 
@@ -602,8 +856,146 @@ step:
         m_programDataOffset = instruction->m_value.IntVal ();
         goto nextStep;
 
+    case OP_SAVE_PARAM: {
+
+        // Allocate parameter data
+        if (!m_data.StackRoomFor(1)) {
+            SetError(ErrUserFuncStackOverflow);
+            break;
+        }
+        int dataIndex = m_data.AllocateStack(1);
+        int paramIndex = instruction->m_value.IntVal();
+
+        // Initialize parameter
+        assert(!m_userCallStack.empty());
+        m_userCallStack.back().localVarDataOffsets[paramIndex] = dataIndex;
+
+        // Transfer register value to parameter
+        vmValue& dest = m_data.Data()[dataIndex];
+        switch (instruction->m_type) {
+        case VTP_INT:
+        case VTP_REAL:
+            dest = m_reg;
+            break;
+        case VTP_STRING:
+
+            // Allocate string space
+            dest.IntVal () = m_strings.Alloc ();
+
+            // Copy string value
+            m_strings.Value (dest.IntVal ()) = m_regString;
+            break;
+        default:
+            assert (false);
+        }
+
+        // Save parameter offset in register (so that OP_REG_DESTRUCTOR will work)
+        m_reg.IntVal() = dataIndex;
+        goto nextStep;
+    }
+
+    case OP_COPY_USER_STACK: {
+
+        // Copy data pointed to by m_reg into next stack frame parameter.
+        // Instruction value points to the parameter data type.
+        if (CopyToParam(
+                m_reg.IntVal(),
+                m_typeSet.GetValType(instruction->m_value.IntVal())))
+            goto nextStep;
+        else
+            break;
+    }
+
+    case OP_MOVE_TEMP: {
+
+        if (MoveToTemp(
+                m_reg.IntVal(),
+                m_typeSet.GetValType(instruction->m_value.IntVal())))
+            goto nextStep;
+        else
+            break;
+    }
+
+    case OP_CHECK_PTR: {
+
+        if (CheckPointer(m_reg2.IntVal(), m_reg.IntVal()))
+            goto nextStep;
+        else {
+            SetError(ErrPointerScopeError);
+            break;
+        }
+
+/*        // Null pointer case
+        if (m_reg.IntVal() == 0)
+            goto nextStep;
+
+        // Check whether pointer points to temporary stack data
+        if (m_reg.IntVal() < m_data.Permanent()) {
+
+            int dest = m_reg2.IntVal();
+
+            // Such pointers can only be stored in variables in the current
+            // stack frame.
+            if (m_userCallStack.empty() || !(dest >= m_data.StackTop() && dest < m_userCallStack.back().prevStackTop)) {
+                SetError(ErrPointerScopeError);
+                break;
+            }
+        }
+        goto nextStep;*/
+    }
+
+    case OP_CHECK_PTRS: {
+        if (CheckPointers(
+                m_reg.IntVal(),
+                m_typeSet.GetValType(instruction->m_value.IntVal()),
+                m_reg2.IntVal()))
+            goto nextStep;
+        else {
+            SetError(ErrPointerScopeError);
+            break;
+        }
+    }
+
+    case OP_REG_DESTRUCTOR: {
+
+        // Register destructor for data pointed to by m_reg.
+        int ptr = m_reg.IntVal();
+        assert(ptr >= 0);
+        if (ptr == 0)
+            ;
+        else if (ptr < m_data.TempData()) {
+
+            // Pointer into temp data found
+            assert(m_tempDestructors.empty() || m_tempDestructors.back().addr < ptr);
+            m_tempDestructors.push_back(vmStackDestructor(ptr, instruction->m_value.IntVal()));
+        }
+        else if (ptr >= m_data.StackTop() && ptr < m_data.Permanent()) {
+
+            // Pointer into stack data found
+            assert(m_stackDestructors.empty() || m_stackDestructors.back().addr > ptr);
+            m_stackDestructors.push_back(vmStackDestructor(ptr, instruction->m_value.IntVal()));
+        }
+        goto nextStep;
+    }
+
+    case OP_SAVE_PARAM_PTR: {
+
+        // Save register pointer into param pointer
+        assert(!m_userCallStack.empty());
+        m_userCallStack.back().localVarDataOffsets[instruction->m_value.IntVal()] = m_reg.IntVal();
+        goto nextStep;
+    }
+
     case OP_RUN:
-        Reset ();                           // Reset program
+
+        // If the stack is not empty, it means we are inside an Execute() call.
+        // Resetting the program is not a good idea, as we will lose all the
+        // stacked state that the Execute() call is expecting to be present when
+        // it returns.
+        if (!m_stack.Empty())
+            SetError(ErrRunCalledInsideExecute);
+        else
+            Reset ();                       // Reset program
         break;                              // Timeshare break
 
     case OP_BREAKPT:
@@ -681,14 +1073,17 @@ void TomVM::CopyField      (int sourceIndex, int destIndex, vmValType& type) {
 
     // If type is basic string, copy string value
     if (type == VTP_STRING) {
-        vmValue& dest = m_data.Data () [destIndex];
+        vmValue& src = m_data.Data()[sourceIndex];
+        vmValue& dest = m_data.Data()[destIndex];
+        if (src.IntVal() > 0 || dest.IntVal() > 0) {
 
-        // Allocate string space if necessary
-        if (dest.IntVal () == 0)
-            dest.IntVal () = m_strings.Alloc ();
+            // Allocate string space if necessary
+            if (dest.IntVal () == 0)
+                dest.IntVal () = m_strings.Alloc ();
 
-        // Copy string value
-        m_strings.Value (dest.IntVal ()) = m_strings.Value (m_data.Data () [sourceIndex].IntVal ());
+            // Copy string value
+            m_strings.Value (dest.IntVal ()) = m_strings.Value (m_data.Data () [sourceIndex].IntVal ());
+        }
     }
 
     // If type is basic, or pointer then just copy value
@@ -722,7 +1117,7 @@ bool TomVM::CopyData       (int sourceIndex, int destIndex, vmValType type) {
         SetError (ErrUnsetPointer);
         return false;
     }
-    
+
     // Calculate element size
     int size = 1;
     if (type.m_basicType >= 0)
@@ -731,7 +1126,8 @@ bool TomVM::CopyData       (int sourceIndex, int destIndex, vmValType type) {
     // If the data types are arrays, then their sizes could be different.
     // If so, this is a run-time error.
     if (type.m_arrayLevel > 0) {
-        int s = sourceIndex, d = destIndex;
+        int s = sourceIndex + (type.m_arrayLevel - 1) * 2,
+            d = destIndex   + (type.m_arrayLevel - 1) * 2;
         for (int i = 0; i < type.m_arrayLevel; i++) {
             assert (m_data.IndexValid (s));
             assert (m_data.IndexValid (s + 1));
@@ -747,8 +1143,8 @@ bool TomVM::CopyData       (int sourceIndex, int destIndex, vmValType type) {
             size += 2;
 
             // Point to first element in array
-            s += 2; 
-            d += 2;
+            s -= 2;
+            d -= 2;
         }
     }
 
@@ -757,6 +1153,93 @@ bool TomVM::CopyData       (int sourceIndex, int destIndex, vmValType type) {
         BlockCopy (sourceIndex, destIndex, size);
     else
         CopyField (sourceIndex, destIndex, type);
+
+    return true;
+}
+
+bool TomVM::CheckPointers(int index, vmValType type, int destIndex) {
+
+    // Check that pointers in data at "index" of type "type" can be stored at
+    // "destIndex" without any pointer scope errors.
+    // (See CheckPointer for defn of "pointer scope error")
+    assert(m_data.IndexValid(index));
+    assert(m_dataTypes.TypeValid(type));
+
+    // Type does not contain any pointers?
+    if (!m_dataTypes.ContainsPointer(type))
+        return true;
+
+    // Type is a pointer?
+    if (type.m_pointerLevel > 0)
+        return CheckPointer(destIndex, m_data.Data()[index].IntVal());
+
+    // Type is not a pointer, but contains one or more pointers.
+    // Need to recursively break down object and check
+
+    // Type is array?
+    if (type.m_arrayLevel > 0) {
+
+        // Find and check elements
+        int elements    = m_data.Data()[index].IntVal();
+        int elementSize = m_data.Data()[index + 1].IntVal();
+        int arrayStart  = index + 2;
+
+        // Calculate element type
+        vmValType elementType = type;
+        elementType.m_arrayLevel--;
+
+        // Check each element
+        for (int i = 0; i < elements; i++)
+            if (!CheckPointers(arrayStart + i * elementSize, elementType, destIndex))
+                return false;
+
+        return true;
+    }
+    else {
+
+        // Must be a structure
+        assert(type.m_basicType >= 0);
+
+        // Find structure definition
+        vmStructure &s = m_dataTypes.Structures()[type.m_basicType];
+
+        // Check each field in structure
+        for (int i = 0; i < s.m_fieldCount; i++) {
+            vmStructureField& f = m_dataTypes.Fields()[s.m_firstField + i];
+            if (!CheckPointers(index + f.m_dataOffset, f.m_type, destIndex))
+                return false;
+        }
+
+        return true;
+    }
+}
+
+bool TomVM::CheckPointer(int dest, int ptr) {
+
+    // Check that pointer "ptr" can be stored at "dest" without a pointer scope
+    // error.
+    // By "pointer scope error" we mean that a pointer of a longer lived scope
+    // is pointing to data of a shorter lived scope.
+    // For example, a global pointer to a local variable.
+
+    // We treat this as a runtime error to prevent system instability that would
+    // result if we allowed the program to continue to run.
+
+    // Note that this approach is a bit of an experiment at the moment.
+    assert(m_data.IndexValid(dest));
+
+    // Null pointer case
+    if (ptr == 0)
+        return true;
+
+    // Check whether pointer points to temporary stack data
+    if (ptr < m_data.Permanent()) {
+
+        // Such pointers can only be stored in variables in the current
+        // stack frame.
+        if (m_userCallStack.empty() || !(dest >= m_data.StackTop() && dest < m_userCallStack.back().prevStackTop))
+            return false;
+    }
 
     return true;
 }
@@ -793,6 +1276,23 @@ bool TomVM::ValidateTypeSize (vmValType& type) {
 
     if (!m_data.RoomFor (m_dataTypes.DataSize (type))) {
         SetError (ErrOutOfMemory);
+        return false;
+    }
+
+    return true;
+}
+
+bool TomVM::ValidateTypeSizeForStack(vmValType& type) {
+    // Enforce variable size limitations.
+    // This prevents rogue programs from trying to allocate unrealistic amounts
+    // of data.
+    if (m_dataTypes.DataSizeBiggerThan(type, m_data.MaxDataSize ())) {
+        SetError(ErrVariableTooBig);
+        return false;
+    }
+
+    if (!m_data.StackRoomFor(m_dataTypes.DataSize(type))) {
+        SetError(ErrUserFuncStackOverflow);
         return false;
     }
 
@@ -838,6 +1338,8 @@ void TomVM::InternalPatchIn () {
     // the program when we've finished.
 
     // User breakpts
+
+/*    // User breakpts
     // Convert from line numbers to offsets
     unsigned int offset = 0;
     vmUserBreakPts::iterator i;
@@ -856,7 +1358,7 @@ void TomVM::InternalPatchIn () {
     for (   i  = m_userBreakPts.begin ();                                               // Loop through breakpoints
             i != m_userBreakPts.end ();
             i++)
-        PatchInBreakPt ((*i).second.m_offset);
+        PatchInBreakPt ((*i).second.m_offset);*/
 
     // Patch in temp breakpts
     for (   vmTempBreakPtList::iterator j = m_tempBreakPts.begin ();
@@ -899,39 +1401,46 @@ void TomVM::AddStepBreakPts (bool stepInto) {
         endOffset++;
 
     // Create breakpoint on next line
-    m_tempBreakPts.push_back (TempBreakPt (endOffset));
+    m_tempBreakPts.push_back(MakeTempBreakPt(endOffset));
 
     // Scan for jumps, and place breakpoints at destination addresses
     for (unsigned int i = startOffset; i < endOffset; i++) {
-        unsigned int dest = 0xffff;
+        unsigned int dest = 0xffffffff;
         switch (m_code [i].m_opCode) {
-        case OP_CALL:
-            if (!stepInto)                                  // If stepInto then fall through to JUMP handling.
-                break;                                      // Otherwise break out, and no BP will be set.
-        case OP_JUMP:
-        case OP_JUMP_TRUE:
-        case OP_JUMP_FALSE:
-            dest = m_code [i].m_value.IntVal ();            // Destination jump address
-            break;
-        case OP_RETURN:
-            if (!m_callStack.empty ())                      // Look at call stack and place breakpoint on return
-                dest = m_callStack [m_callStack.size () - 1];
-            break;
+            case OP_CALL:
+                if (!stepInto)                                  // If stepInto then fall through to JUMP handling.
+                    break;                                      // Otherwise break out, and no BP will be set.
+            case OP_JUMP:
+            case OP_JUMP_TRUE:
+            case OP_JUMP_FALSE:
+                dest = m_code[i].m_value.IntVal();              // Destination jump address
+                break;
+
+            case OP_RETURN:
+            case OP_RETURN_USER_FUNC:
+                if (!m_userCallStack.empty())
+                    dest = m_userCallStack.back().returnAddr;
+                break;
+
+            case OP_CREATE_USER_FRAME:
+                if (stepInto)
+                    dest = m_userFunctions[m_code[i].m_value.IntVal()].programOffset;
+                break;
         }
 
-        if (dest < m_code.size ()                           // Destination valid?
-        &&  (dest < startOffset || dest >= endOffset))      // Destination outside line we are stepping over?
-            m_tempBreakPts.push_back (TempBreakPt (dest));  // Add breakpoint
+        if (dest < m_code.size ()                               // Destination valid?
+        &&  (dest < startOffset || dest >= endOffset))          // Destination outside line we are stepping over?
+            m_tempBreakPts.push_back(MakeTempBreakPt(dest));    // Add breakpoint
     }
 }
 
 bool TomVM::AddStepOutBreakPt () {
 
     // Call stack must contain at least 1 return
-    if (!m_callStack.empty ()) {
-        unsigned int returnAddr = m_callStack [m_callStack.size () - 1];        // Find return addr
+    if (!m_userCallStack.empty()) {
+        unsigned int returnAddr = m_userCallStack.back().returnAddr;
         if (returnAddr < m_code.size ()) {                                      // Validate it
-            m_tempBreakPts.push_back (TempBreakPt (returnAddr));                // Place breakpoint
+            m_tempBreakPts.push_back(MakeTempBreakPt(returnAddr));              // Place breakpoint
             return true;
         }
     }
@@ -951,14 +1460,17 @@ vmState TomVM::GetState () {
     s.reg2String    = m_reg2String;
 
     // Stacks
-    s.stackTop      = m_stack.Size ();
-    s.callStackTop  = m_callStack.size ();
+    s.stackTop          = m_stack.Size();
+//    s.callStackTop      = m_callStack.size();
+    s.userFuncStackTop  = m_userCallStack.size();
+    s.currentUserFrame  = m_currentUserFrame;
 
     // Top of program
-    s.codeSize      = InstructionCount ();
+    s.codeSize          = InstructionCount ();
+    s.codeBlockCount    = m_codeBlocks.size();
 
     // Variable data
-    m_data.GetState (s.dataSize, s.tempDataStart);
+    m_data.SaveState(s.stackDataTop, s.tempDataLock);
 
     // Error state
     s.error         = Error ();
@@ -983,17 +1495,24 @@ void TomVM::SetState (vmState& state) {
     m_reg2String        = state.reg2String;
 
     // Stacks
-    if (state.stackTop < m_stack.Size ())
-        m_stack.Resize (state.stackTop);
-    if (state.callStackTop < m_callStack.size ())
-        m_callStack.resize (state.callStackTop);
+    if ((unsigned)state.stackTop < m_stack.Size())
+        m_stack.Resize(state.stackTop);
+//    if (state.callStackTop < m_callStack.size())
+//        m_callStack.resize(state.callStackTop);
+    if (state.userFuncStackTop < m_userCallStack.size())
+        m_userCallStack.resize(state.userFuncStackTop);
+    m_currentUserFrame = state.currentUserFrame;
 
     // Top of program
     if (state.codeSize < m_code.size ())
         m_code.resize (state.codeSize);
+    if (state.codeBlockCount < m_codeBlocks.size())
+        m_codeBlocks.resize(state.codeBlockCount);
 
     // Variable data
-    m_data.SetState (state.dataSize, state.tempDataStart);
+    UnwindTemp();
+    UnwindStack(state.stackDataTop);
+    m_data.RestoreState(state.stackDataTop, state.tempDataLock, true);
 
     // Error state
     if (state.error)    SetError (state.errorString);
@@ -1009,7 +1528,7 @@ std::string TomVM::BasicValToString (vmValue val, vmBasicValType type, bool cons
     case VTP_REAL:      return RealToString (val.RealVal ());
     case VTP_STRING:    
         if (constant) {
-            if (val.IntVal () >= 0 && val.IntVal () < m_stringConstants.size ())
+            if (val.IntVal () >= 0 && (unsigned)val.IntVal () < m_stringConstants.size ())
                 return "\"" + m_stringConstants [val.IntVal ()] + "\"";
             else
                 return "???";
@@ -1021,7 +1540,7 @@ std::string TomVM::BasicValToString (vmValue val, vmBasicValType type, bool cons
 }
 
 inline std::string TrimToLength (std::string str, int& length) {
-    if (str.length () > length) {
+    if (str.length () > (unsigned)length) {
         length = 0;
         return str.substr(0, length);
     }
@@ -1043,7 +1562,8 @@ void TomVM::Deref (vmValue& val, vmValType& type) {
     else {
 
         // Follow pointer
-        assert (m_data.IndexValid (val.IntVal ()));
+        if (!m_data.IndexValid(val.IntVal()))            // DEBUGGING!!!
+            assert (m_data.IndexValid (val.IntVal ()));
         val = m_data.Data () [val.IntVal ()];
     }
 }
@@ -1130,11 +1650,19 @@ std::string TomVM::ValToString (vmValue val, vmValType type, int& maxChars) {
 }
 
 std::string TomVM::VarToString (vmVariable& v, int maxChars) {
-    vmValue     val = vmValue ((int) v.m_dataIndex);
+/*    vmValue     val = vmValue ((int) v.m_dataIndex);
     vmValType   type = v.m_type;
     type.m_pointerLevel++;
     Deref (val, type);
-    return ValToString (val, type, maxChars);
+    return ValToString (val, type, maxChars);*/
+    return DataToString(v.m_dataIndex, v.m_type, maxChars);
+}
+
+std::string TomVM::DataToString(int dataIndex, vmValType type, int maxChars) {
+    vmValue val = vmValue(dataIndex);
+    type.m_pointerLevel++;
+    Deref(val, type);
+    return ValToString(val, type, maxChars);
 }
 
 bool TomVM::ReadProgramData    (vmBasicValType type) {
@@ -1158,7 +1686,7 @@ bool TomVM::ReadProgramData    (vmBasicValType type) {
         switch (e.Type ()) {
         case VTP_STRING:
             assert (e.Value ().IntVal () >= 0);
-            assert (e.Value ().IntVal () < m_stringConstants.size ());
+            assert ((unsigned)e.Value ().IntVal () < m_stringConstants.size ());
             RegString () = m_stringConstants [e.Value ().IntVal ()];
             return true;
         case VTP_INT:
@@ -1197,9 +1725,325 @@ bool TomVM::ReadProgramData    (vmBasicValType type) {
             return true;
         }
         break;
-    } 
+    }
     assert (false);
     return false;
+}
+
+int TomVM::StoredDataSize(int sourceIndex, vmValType& type) {
+    assert(!type.m_byRef);
+
+    if (type.m_pointerLevel == 0 && type.m_arrayLevel > 0) {
+        // Calculate actual array size
+        // Array is prefixed by element count and element size.
+        return m_data.Data()[sourceIndex].IntVal() * m_data.Data()[sourceIndex + 1].IntVal() + 2;
+    }
+    else
+        return m_dataTypes.DataSize(type);
+}
+
+bool TomVM::CopyToParam(int sourceIndex, vmValType& type) {
+
+    // Check source index is valid
+    if (!m_data.IndexValid(sourceIndex) || sourceIndex == 0) {
+        SetError (ErrUnsetPointer);
+        return false;
+    }
+
+    // Calculate data size.
+    // Note that the "type" does not specify array dimensions (if type is an array),
+    // so they must be read from the source array.
+    int size = StoredDataSize(sourceIndex, type);
+
+    // Allocate data for parameter on stack
+    if (!m_data.StackRoomFor(size)) {
+        SetError(ErrUserFuncStackOverflow);
+        return false;
+    }
+    int dataIndex = m_data.AllocateStack(size);
+
+    // Block copy the data
+    BlockCopy(sourceIndex, dataIndex, size);
+
+    // Duplicate any contained strings
+    if (m_dataTypes.ContainsString(type))
+        DuplicateStrings(dataIndex, type);
+
+    // Store pointer in register
+    m_reg.IntVal() = dataIndex;
+
+    return true;
+}
+
+void TomVM::DuplicateStrings(int dataIndex, vmValType& type) {
+
+    // Called after data is block copied.
+    // Strings are stored as pointers to string objects. After a block copy,
+    // the source and destination blocks end up pointing to the same string
+    // objects.
+    // This method traverses the destination block, creates duplicate copies of
+    // any contained strings and fixes up the pointers to point to these new
+    // string objects.
+    assert(m_dataTypes.ContainsString(type));
+    assert(!type.m_byRef);
+    assert(type.m_pointerLevel == 0);
+
+    // Type IS string case
+    if (type == VTP_STRING) {
+
+        vmValue& val = m_data.Data()[dataIndex];
+        // Empty strings (index 0) can be ignored
+        if (val.IntVal() != 0) {
+
+            // Allocate new string
+            int newStringIndex = m_strings.Alloc();
+
+            // Copy previous string
+            m_strings.Value(newStringIndex) = m_strings.Value(val.IntVal());
+
+            // Point to new string
+            val.IntVal() = newStringIndex;
+        }
+    }
+
+    // Array case
+    else if (type.m_arrayLevel > 0) {
+
+        // Read array header
+        int elements    = m_data.Data()[dataIndex].IntVal();
+        int elementSize = m_data.Data()[dataIndex + 1].IntVal();
+        int arrayStart  = dataIndex + 2;
+
+        // Calculate element type
+        vmValType elementType = type;
+        elementType.m_arrayLevel--;
+
+        // Duplicate strings in each array element
+        for (int i = 0; i < elements; i++)
+            DuplicateStrings(arrayStart + i * elementSize, elementType);
+    }
+
+    // Otherwise must be a structure
+    else {
+        assert(type.m_basicType >= 0);
+
+        // Find structure definition
+        vmStructure &s = m_dataTypes.Structures()[type.m_basicType];
+
+        // Duplicate strings for each field in structure
+        for (int i = 0; i < s.m_fieldCount; i++) {
+            vmStructureField& f = m_dataTypes.Fields()[s.m_firstField + i];
+            if (m_dataTypes.ContainsString(f.m_type))
+                DuplicateStrings(dataIndex + f.m_dataOffset, f.m_type);
+        }
+    }
+}
+
+bool TomVM::MoveToTemp(int sourceIndex, vmValType& type) {
+
+    // Free temp data
+    // Note: We can do this because we know that the data isn't really freed,
+    // just marked as free. This is significant, because the data we are moving
+    // into the temp data area may be in temp-data already.
+
+    // Special handling is required if data being copied is already in the
+    // temp region
+    bool sourceIsTemp = sourceIndex > 0 && sourceIndex < m_data.TempData();
+
+    // Destroy temp data.
+    // However, if the data being copied is in temp data, we use a
+    // protected-stack-range to prevent it being destroyed.
+    if (sourceIsTemp)
+        UnwindTemp(vmProtectedStackRange(sourceIndex, sourceIndex + StoredDataSize(sourceIndex, type)));
+    else
+        UnwindTemp();
+
+    // Free the data
+    m_data.FreeTemp();
+
+    // Calculate data size.
+    // Note that the "type" does not specify array dimensions (if type is an array),
+    // so they must be read from the source array.
+    int size = StoredDataSize(sourceIndex, type);
+
+    // Allocate data for parameter on stack
+    if (!m_data.StackRoomFor(size)) {
+        SetError(ErrUserFuncStackOverflow);
+        return false;
+    }
+    int dataIndex = m_data.AllocateTemp(size, false);
+
+    // Block copy the data
+    BlockCopy(sourceIndex, dataIndex, size);
+
+    // Extra logic required to manage strings
+    if (m_dataTypes.ContainsString(type)) {
+
+        // If source was NOT temp data, then the object has been copied, rather
+        // than moved, and we must duplicate all the contained string objects.
+        if (!sourceIsTemp)
+            DuplicateStrings(dataIndex, type);
+    }
+
+    // Store pointer in register
+    m_reg.IntVal() = dataIndex;
+
+    return true;
+}
+
+void TomVM::UnwindTemp() {
+    UnwindTemp(vmProtectedStackRange());
+}
+
+void TomVM::UnwindTemp(vmProtectedStackRange protect) {
+    int newTop = m_data.TempDataLock();
+
+    // Run destrution logic over data that is about to be deallocated.
+    while (!m_tempDestructors.empty() && m_tempDestructors.back().addr >= newTop) {
+        DestroyData(m_tempDestructors.back(), protect);
+        m_tempDestructors.pop_back();
+    }
+
+    // Note: We don't actually remove the data from the stack. Calling code must
+    // handle that instead.
+}
+
+void TomVM::UnwindStack(int newTop) {
+
+    // Run destruction logic over data that is about to be deallocated.
+    while (!m_stackDestructors.empty() && m_stackDestructors.back().addr < newTop) {
+        DestroyData(m_stackDestructors.back(), vmProtectedStackRange());
+        m_stackDestructors.pop_back();
+    }
+
+    // Note: We don't actually remove the data from the stack. Calling code must
+    // handle that instead.
+}
+
+void TomVM::DestroyData(vmStackDestructor& d, vmProtectedStackRange protect) {
+
+    // Apply destructor logic to data block.
+    DestroyData(d.addr, m_typeSet.GetValType(d.dataTypeIndex), protect);
+}
+
+void TomVM::DestroyData(int index, vmValType type, vmProtectedStackRange protect) {
+    assert(m_dataTypes.ContainsString(type));
+    assert(!type.m_byRef);
+
+    // Note: Current "destruction" logic involves deallocating strings stored
+    // in the data. (But could later be extended to something more general
+    // purpose.)
+    if (type == VTP_STRING) {
+
+        // Don't destroy if in protected range
+        if (protect.ContainsAddr(index))
+            return;
+
+        // Type IS string case
+
+        // Deallocate the string (if allocated)
+        int stringIndex = m_data.Data()[index].IntVal();
+        if (stringIndex != 0)
+            m_strings.Free(stringIndex);
+    }
+    else if (type.m_arrayLevel > 0) {
+
+        // Array case
+        vmValType elementType = type;
+        elementType.m_arrayLevel--;
+        int count = m_data.Data()[index].IntVal();
+        int elementSize = m_data.Data()[index + 1].IntVal();
+        int arrayStart = index + 2;
+
+        // Don't destroy if in protected range
+        if (protect.ContainsRange(index, arrayStart + count * elementSize))
+            return;
+
+        // Recursively destroy each element
+        for (int i = 0; i < count; i++)
+            DestroyData(arrayStart + i * elementSize, elementType, protect);
+    }
+    else {
+
+        // At this point we know the type contains a string and is not a string
+        // or array.
+        // Can only be a structure.
+        assert(type.m_pointerLevel == 0);
+        assert(type.m_basicType >= 0);
+
+        // Recursively destroy each structure field (that contains a string)
+        vmStructure& s = m_dataTypes.Structures()[(int)type.m_basicType];
+
+        // Don't destroy if in protected range
+        if (protect.ContainsRange(index, index + s.m_dataSize))
+            return;
+
+        for (int i = 0; i < s.m_fieldCount; i++) {
+
+            // Get field info
+            vmStructureField& f = m_dataTypes.Fields()[s.m_firstField + i];
+
+            // Destroy if contains string(s)
+            if (m_dataTypes.ContainsString(f.m_type))
+                DestroyData(index + f.m_dataOffset, f.m_type, protect);
+        }
+    }
+}
+
+int TomVM::NewCodeBlock() {
+    m_codeBlocks.push_back(vmCodeBlock());
+
+    // Set pointer to code
+    CurrentCodeBlock().programOffset = m_code.size();
+
+    // Bind code block
+    m_boundCodeBlock = m_codeBlocks.size() - 1;
+
+    // Return index of new code block
+    return m_boundCodeBlock;
+}
+
+vmCodeBlock& TomVM::CurrentCodeBlock() {
+    assert(!m_codeBlocks.empty());
+    return m_codeBlocks.back();
+}
+
+int TomVM::CurrentCodeBlockIndex() {
+    assert(!m_codeBlocks.empty());
+    return m_codeBlocks.size() - 1;
+}
+
+bool TomVM::IsCodeBlockValid(int index) {
+    return index >= 0 && (unsigned)index < m_codeBlocks.size();
+}
+
+int TomVM::GetCodeBlockOffset(int index) {
+    assert(IsCodeBlockValid(index));
+    return m_codeBlocks[index].programOffset;
+}
+
+vmRollbackPoint TomVM::GetRollbackPoint() {
+    vmRollbackPoint r;
+
+    r.codeBlockCount            = m_codeBlocks.size();
+    r.boundCodeBlock            = m_boundCodeBlock;
+    r.functionPrototypeCount    = m_userFunctionPrototypes.size();
+    r.functionCount             = m_userFunctions.size();
+    r.dataCount                 = m_programData.size();
+    r.instructionCount          = m_code.size();
+
+    return r;
+}
+
+void TomVM::Rollback(vmRollbackPoint rollbackPoint) {
+
+    // Rollback virtual machine
+    m_codeBlocks.resize(rollbackPoint.codeBlockCount);
+    m_boundCodeBlock = rollbackPoint.boundCodeBlock;
+    m_userFunctionPrototypes.resize(rollbackPoint.functionPrototypeCount);
+    m_userFunctions.resize(rollbackPoint.functionCount);
+    m_programData.resize(rollbackPoint.dataCount);
+    m_code.resize(rollbackPoint.instructionCount);
 }
 
 #ifdef VM_STATE_STREAMING
@@ -1209,6 +2053,9 @@ void TomVM::StreamOut (std::ostream& stream) {
     // Stream header
     WriteString (stream, streamHeader);
     WriteLong (stream, streamVersion);
+
+    // Plugin DLLs
+    m_plugins.StreamOut(stream);
 
     // Variables
     m_variables.StreamOut (stream);         // Note: m_variables automatically streams out m_dataTypes
@@ -1230,57 +2077,85 @@ void TomVM::StreamOut (std::ostream& stream) {
     WriteLong (stream, m_programData.size ());
     for (i = 0; i < m_programData.size (); i++)
         m_programData [i].StreamOut (stream);
+
+    // User function prototypes
+    WriteLong(stream, m_userFunctionPrototypes.size());
+    for (i = 0; i < m_userFunctionPrototypes.size(); i++)
+        m_userFunctionPrototypes[i].StreamOut(stream);
+
+    // User functions
+    WriteLong(stream, m_userFunctions.size());
+    for (i = 0; i < m_userFunctions.size(); i++)
+        m_userFunctions[i].StreamOut(stream);
+
+    // Code blocks
+    WriteLong(stream, m_codeBlocks.size());
+    for (i = 0; i < m_codeBlocks.size(); i++)
+        m_codeBlocks[i].StreamOut(stream);
+    
 }
 
-void TomVM::StreamIn (std::istream& stream) {
-    int i, count;
+bool TomVM::StreamIn (std::istream& stream) {
 
-    // Clear existing program
-    New ();
+    // Read and validate stream header
+    if (ReadString(stream) != streamHeader)
+        return false;
+    if (ReadLong(stream) != streamVersion)
+        return false;
 
-    // Read in stream header, and validate
-	int length = ReadLong (stream);
-	if (length != streamHeader.length ()) {
-		SetError ("Error in Virtual Machine stream: " + IntToString (length));
-		return;
-	}
-    char buf [16];
-    stream.read (buf, 15);
-	buf [15] = 0;
-    if ((std::string) buf != streamHeader) {
-        SetError ("Error in Virtual Machine stream: " + (std::string) buf);
-        return;
+    // Plugin DLLs
+    if (!m_plugins.StreamIn(stream)) {
+        SetError(m_plugins.Error());
+        return false;
     }
 
-    // Read in stream version and validate
-    int version = ReadLong (stream);
-    if (version != streamVersion) {
-        SetError ((std::string) "Wrong version in Virtual Machine stream. Stream version: " + IntToString (version) + ", expected version: " + IntToString (streamVersion));
-        return;
-    }
+    // Register plugin structures and functions in VM
+    m_plugins.StructureManager().AddVMStructures(DataTypes());
+    m_plugins.CreateVMFunctionSpecs();
 
     // Variables
-    m_variables.StreamIn (stream);
+    m_variables.StreamIn(stream);
 
     // String constants
+    int count, i;
     count = ReadLong (stream);
     m_stringConstants.resize (count);
     for (i = 0; i < count; i++)
-        m_stringConstants [i] = ReadString (stream);
+        m_stringConstants[i] = ReadString (stream);
 
     // Data type lookup table
-    m_typeSet.StreamIn (stream);
+    m_typeSet.StreamIn(stream);
 
     // Program code
-    count = ReadLong (stream);
-    m_code.resize (count);
+    count = ReadLong(stream);
+    m_code.resize(count);
     for (i = 0; i < count; i++)
-        m_code [i].StreamIn (stream);
+        m_code[i].StreamIn(stream);
 
     // Program data (for "DATA" statements)
-    count = ReadLong (stream);
-    m_programData.resize (count);
+    count = ReadLong(stream);
+    m_programData.resize(count);
     for (i = 0; i < count; i++)
-        m_programData [i].StreamIn (stream);
+        m_programData[i].StreamIn(stream);
+
+    // User function prototypes
+    count = ReadLong(stream);
+    m_userFunctionPrototypes.resize(count);
+    for (i = 0; i < count; i++)
+        m_userFunctionPrototypes[i].StreamIn(stream);
+
+    // User functions
+    count = ReadLong(stream);
+    m_userFunctions.resize(count);
+    for (i = 0; i < count; i++)
+        m_userFunctions[i].StreamIn(stream);
+
+    // Code blocks
+    count = ReadLong(stream);
+    m_codeBlocks.resize(count);
+    for (i = 0; i < count; i++)
+        m_codeBlocks[i].StreamIn(stream);
+
+    return true;
 }
 #endif

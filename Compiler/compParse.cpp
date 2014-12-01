@@ -5,6 +5,8 @@
 
 #include "compParse.h"
 
+using namespace std;
+
 //---------------------------------------------------------------------------
 
 #ifndef _MSC_VER
@@ -138,16 +140,15 @@ compToken compParser::NextToken (bool skipEOL, bool dataMode) {
                     }
                 }
                 else {
-                    if (c == '.')                               // Floating point number
+                    bool validDecimalPt = c == '.' && t.m_valType == VTP_INT;
+                    if (validDecimalPt)                                     // Floating point number
                         t.m_valType = VTP_REAL;
-// HEX PARSING DISABLED!!!
-//
-// Otherwise .x is treated as a number (floating point 0 in hex!)
-// This can be a problem in expressions such as "thing.xPosition"
-//                    if (lcase == 'x')                           // Hexidecimal notation; 0x...
-//                        hex = true;
-                    done = !(   IsNumber (c)                                // Regular decimal number
-//                                || (lcase == 'x')                           // Hex specifier
+                    bool hexSpecifier = lcase == 'x' && (t.m_text == "0" || t.m_text == "-0");
+                    if (hexSpecifier)
+                        hex = true;
+                    done = !(   (c >= '0' && c <= '9')
+                                || validDecimalPt
+                                || hexSpecifier                             // Hex specifier
                                 || (hex && lcase >= 'a' && lcase <= 'f'));  // Or hex digit
                 }
                 break;
@@ -172,6 +173,15 @@ compToken compParser::NextToken (bool skipEOL, bool dataMode) {
                 t.m_text    = t.m_text + GetChar (t.m_valType == VTP_STRING);
                 c           = PeekChar (t.m_valType == VTP_STRING);
                 lcase       = tolower (c);
+            }
+            else {
+                // Check token is well formed
+                if (t.m_type == CTT_CONSTANT && t.m_valType == VTP_INT) {
+                    // Check integer number is valid
+                    char last = t.m_text[t.m_text.size() - 1];
+                    if (last == 'x' || last == 'X')
+                        SetError((string)"'" + t.m_text + "' is not a valid number");
+                }
             }
         }
     }
@@ -204,16 +214,15 @@ compToken compParser::NextToken (bool skipEOL, bool dataMode) {
                 // (Also, numeric types can't have spaces).
                 // Decimal point means floating point (real) type.
                 if (t.m_valType != VTP_STRING) {
-
-                    if (c == '.')                                   // Floating point number
+                    bool validDecimalPt = c == '.' && t.m_valType == VTP_INT;
+                    if (validDecimalPt)                                   // Floating point number
                         t.m_valType = VTP_REAL;
-// HEX PARSING DISABLED!!!
-//
-// (See previous hex parsing note)
-//                    if (lcase == 'x')                               // Hexidecimal notation; 0x...
-//                        hex = true;
-                    if (!(      IsNumber (c)                                // Regular decimal number
-//                            ||  (lcase == 'x')                              // Hex specifier
+                    bool hexSpecifier = lcase == 'x' && (t.m_text == "0" || t.m_text == "-0");
+                    if (hexSpecifier)
+                        hex = true;
+                    if (!(  (c >= '0' && c <= '9')
+                            ||  validDecimalPt                              // Regular decimal number
+                            ||  hexSpecifier
                             ||  (hex && lcase >= 'a' && lcase <= 'f')       // Or hex digit
                             ||  (firstIteration && c == '-')                // Negative sign
                             ||  (c <= ' '))                                 // Trailing whitespace
@@ -230,6 +239,15 @@ compToken compParser::NextToken (bool skipEOL, bool dataMode) {
                     t.m_text    = t.m_text + GetChar (false);
                 c           = PeekChar (false);
                 lcase       = tolower (c);
+            }
+            else {
+                // Check token is well formed
+                if (t.m_type == CTT_CONSTANT && t.m_valType == VTP_INT) {
+                    // Check integer number is valid
+                    char last = t.m_text[t.m_text.size() - 1];
+                    if (last == 'x' || last == 'X')
+                        SetError((string)"'" + t.m_text + "' is not a valid number");
+                }
             }
             firstIteration = false;
         }

@@ -6,34 +6,39 @@
 #ifndef vmDebuggerH
 #define vmDebuggerH
 //---------------------------------------------------------------------------
-#include "vmCode.h"
-#include <list>
-#include <map>
+#include "DebuggerInterfaces.h"
+#include "compPreprocessor.h"
 
 ////////////////////////////////////////////////////////////////////////////////
-// Breakpoint types
+//  Debugger
+//
+/// Debugger helper object.
+class Debugger : public IVMDebugger {
+    std::vector<SourceUserBreakPt> userBreakPts;
+    ILineNumberMapping& mapping;
 
-struct vmPatchedBreakPt {
-    unsigned int    m_offset;                                       // Op-Code offset in program
-    vmOpCode        m_replacedOpCode;                               // For active breakpoints: The op-code that has been replaced with the OP_BREAKPT.
+    // Return breakpoint position or userBreakPts.end() if not found.
+    std::vector<SourceUserBreakPt>::iterator FindBreakPt(std::string filename, int lineNo);
+public:
+    Debugger(ILineNumberMapping& _mapping);
+
+    // UI interface
+    void ClearUserBreakPts();
+    void AddUserBreakPt(std::string filename, int lineNo);
+    void RemoveUserBreakPt(std::string filename, int lineNo);
+    void ToggleUserBreakPt(std::string filename, int lineNo);
+    bool IsUserBreakPt(std::string filename, int lineNo);
+
+    /// Adjust debugging information in response to an insertion/deletion of
+    /// one or more lines.
+    /// If delta is positive, |delta| lines will be inserted.
+    /// If delta is negative, |delta| lines will be deleted.
+    /// Breakpoints will be moved (or deleted) appropriately.
+    void InsertDeleteLines(std::string filename, int fileLineNo, int delta); 
+
+    // IVMDebugger methods
+    virtual int UserBreakPtCount();
+    virtual int UserBreakPtLine(int index);
 };
-
-struct vmTempBreakPt {
-    unsigned int    m_offset;
-};
-
-struct vmUserBreakPt {
-    unsigned int    m_offset;                                       // Note: Set to 0xffff if line is invalid.
-};
-
-typedef std::list<vmPatchedBreakPt> vmPatchedBreakPtList;
-typedef std::list<vmTempBreakPt>    vmTempBreakPtList;
-typedef std::map<unsigned int, vmUserBreakPt> vmUserBreakPts;       // Maps line number to breakpoint structure
-
-inline vmTempBreakPt TempBreakPt (int offset) {
-    vmTempBreakPt bp;
-    bp.m_offset = offset;
-    return bp;
-}
 
 #endif

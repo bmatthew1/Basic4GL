@@ -11,12 +11,14 @@
 #include "vmCode.h"
 #include "HasErrorState.h"
 #include "vmFunction.h"
-#include "vmDebugger.h"
-//#include "EmbeddedFiles.h"
+#include "DebuggerInterfaces.h"
+#include "vmStackFrame.h"
+#include "vmCodeBlock.h"
 
-#define VM_MAXSTACKCALLS 1000000        // 1,000,000 stack calls (4 meg stack space)
-#define VM_MAXDATA       100000000      // 100,000,000 variables (.4 gig of memory)
-#define VM_DATATOSTRINGMAXCHARS 4000
+#define VM_MAXUSERSTACKCALLS    10000   // 10,000 user function stack calls
+#define VM_MAXDATA          100000000   // 100,000,000 variables (.4 gig of memory)
+#define VM_MAXSTACK            250000   // First 250,000 (1 meg) reserved for stack/temp data space
+#define VM_DATATOSTRINGMAXCHARS   800   // Any more gets annoying...
 
 ////////////////////////////////////////////////////////////////////////////////
 // VM state
@@ -35,13 +37,15 @@ struct vmState {
     std::string     regString, reg2String;
 
     // Stacks
-    unsigned int    stackTop, callStackTop;
+    unsigned int    stackTop, /*callStackTop, */userFuncStackTop;
+    int             currentUserFrame;
 
     // Top of program
     unsigned int    codeSize;
+    unsigned int    codeBlockCount;
 
-    // Top of variable data
-    unsigned int    dataSize, tempDataStart;
+    // Variable data
+    int             stackDataTop, tempDataLock;
 
     // Error state
     bool            error;
@@ -49,6 +53,25 @@ struct vmState {
 
     // Other state
     bool            paused;
+};
+
+struct vmRollbackPoint {
+    
+    // Registered code blocks
+    int codeBlockCount;
+    int boundCodeBlock;
+
+    // User function prototypes
+    int functionPrototypeCount;
+
+    // User functions
+    int functionCount;
+
+    // Data statements
+    int dataCount;
+
+    // Program statements
+    int instructionCount;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -62,26 +85,42 @@ class TomVM : public HasErrorState {
     // Data
 
     // Variables, data and data types
-    vmTypeLibrary               m_dataTypes;
-    vmData                      m_data;
-    vmVariables                 m_variables;
-	std::vector<vmString>       m_stringConstants;      // Constant strings declared in program
-    vmStore<vmString>           m_strings;
-    std::list<vmResources *>    m_resources;
+    vmTypeLibrary                       m_dataTypes;
+    vmData                              m_data;
+    vmVariables                         m_variables;
+	std::vector<vmString>               m_stringConstants;  // Constant strings declared in program
+    vmStore<vmString>                   m_strings;
+    std::list<vmResources *>            m_resources;
+    std::vector<vmUserFuncPrototype>    m_userFunctionPrototypes;
+    std::vector<vmUserFunc>             m_userFunctions;
 
     // Program data
-    vmProgramData               m_programData;          // General purpose program data (e.g declared with "DATA" keyword in BASIC)
-    unsigned int                m_programDataOffset;
+    vmProgramData                       m_programData;          // General purpose program data (e.g declared with "DATA" keyword in BASIC)
+    unsigned int                        m_programDataOffset;
 
     // Registers
-    vmValue                     m_reg,                  // Register values (when int or float)
-                                m_reg2;
-    std::string                 m_regString,            // Register values when string
-                                m_reg2String;
+    vmValue                             m_reg,                  // Register values (when int or float)
+                                        m_reg2;
+    std::string                         m_regString,            // Register values when string
+                                        m_reg2String;
+    int                                 m_currentUserFrame;
+        // The current active frame.
+        // Note that this is often but NOT ALWAYS the top of the stack.
+        // (When evaluating parameters for a impending function call, the pending
+        // function stack frame is the top of the stack, but is not yet active).
 
     // Runtime stacks
-    vmValueStack                m_stack;                // Used for expression evaluation
-    std::vector<unsigned int>   m_callStack;            // Stores gosub return addresses
+    vmValueStack                        m_stack;                // Used for expression evaluation
+    std::vector<vmUserFuncStackFrame>   m_userCallStack;        // Call stack for user functions
+
+    // Individual code blocks
+    std::vector<vmCodeBlock>            m_codeBlocks;
+    int                                 m_boundCodeBlock;
+
+    // Data destruction
+    std::vector<vmStackDestructor>      m_stackDestructors;
+    std::vector<vmStackDestructor>      m_tempDestructors;
+
 
     ////////////////////////////////////
     // Code
@@ -96,7 +135,6 @@ class TomVM : public HasErrorState {
     // Debugging
     vmPatchedBreakPtList        m_patchedBreakPts;      // Patched in breakpoints
     vmTempBreakPtList           m_tempBreakPts;         // Temporary breakpoints, generated for stepping over a line
-    vmUserBreakPts              m_userBreakPts;         // User specified breakpoints. Stored as a map from line number to breakpoint
 
     bool                        m_paused,               // Set to true when program hits a breakpoint. (Or can be set by caller.)
                                 m_breakPtsPatched;      // Set to true if breakpoints are patched and in synchronisation with compiled code
@@ -107,8 +145,12 @@ class TomVM : public HasErrorState {
     void CopyArray          (int sourceIndex, int destIndex, vmValType& type);
     void CopyField          (int sourceIndex, int destIndex, vmValType& type);
     bool CopyData           (int sourceIndex, int destIndex, vmValType type);
+    bool CopyToParam        (int sourceIndex, vmValType& type);
+    bool MoveToTemp         (int sourceIndex, vmValType& type);
+    void DuplicateStrings   (int dataIndex, vmValType& type);
     bool PopArrayDimensions (vmValType& type);
     bool ValidateTypeSize   (vmValType& type);
+    bool ValidateTypeSizeForStack(vmValType& type);
     bool ReadProgramData    (vmBasicValType type);
     void PatchInBreakPt (unsigned int offset);
     void InternalPatchOut ();
@@ -119,9 +161,19 @@ class TomVM : public HasErrorState {
     }
     unsigned int CalcBreakPtOffset (unsigned int line);
     void Deref (vmValue& val, vmValType& type);
+    int StoredDataSize(int sourceIndex, vmValType& type);
+    bool CheckPointers(int index, vmValType type, int destIndex);
+    bool CheckPointer(int dest, int ptr);
+    void UnwindTemp();
+    void UnwindTemp(vmProtectedStackRange protect);
+    void UnwindStack(int newTop);
+    void DestroyData(vmStackDestructor& d, vmProtectedStackRange protect);
+    void DestroyData(int index, vmValType type, vmProtectedStackRange protect);    
 
 public:
-    TomVM (int maxDataSize = VM_MAXDATA);
+    TomVM(
+            int maxDataSize = VM_MAXDATA,
+            int maxStackSize = VM_MAXSTACK);
 
     // General
     void New ();                                        // New program
@@ -129,14 +181,21 @@ public:
     void Reset ();
     void Continue (unsigned int steps = 0xffffffff);    // Continue execution from last position
     bool Done () {
-        assert (m_ip < m_code.size ());
+        assert(IPValid());
         return m_code [m_ip].m_opCode == OP_END;        // Reached end of program?
     }
     void GetIPInSourceCode (int& line, int& col) {
-        assert (m_ip < m_code.size ());
+        assert(IPValid());
         line    = m_code [m_ip].m_sourceLine;
         col     = m_code [m_ip].m_sourceChar;
     }
+
+    // Code blocks
+    int NewCodeBlock();
+    vmCodeBlock& CurrentCodeBlock();
+    int CurrentCodeBlockIndex();
+    void BindCodeBlock(int index) { m_boundCodeBlock = index; }
+    int GetBoundCodeBlock() { return m_boundCodeBlock; }
 
     // External functions
     std::vector<vmFunction>     m_functions;
@@ -152,7 +211,7 @@ public:
     std::vector<vmFunction>     m_initFunctions;
 
     // IP and registers
-    int             IP ()           { return m_ip; }
+    unsigned int    IP ()           { return m_ip; }            
     vmValue&        Reg ()          { return m_reg; }
     vmValue&        Reg2 ()         { return m_reg2; }
     std::string&    RegString ()    { return m_regString; }
@@ -165,25 +224,17 @@ public:
     vmVariables&    Variables ()    { return m_variables; }
     vmProgramData&  ProgramData ()  { return m_programData; }
 
+    // User functions
+    std::vector<vmUserFuncPrototype>& UserFunctionPrototypes() { return m_userFunctionPrototypes; }
+    std::vector<vmUserFunc>& UserFunctions() { return m_userFunctions; }
+    std::vector<vmUserFuncStackFrame>& UserCallStack() { return m_userCallStack; }
+    int CurrentUserFrame() { return m_currentUserFrame; }
+
     // Debugging
     bool            Paused ()           { return m_paused; }
     void            Pause ()            { m_paused = true; }
     bool            BreakPtsPatched ()  { return m_breakPtsPatched; }
-    bool IsUserBreakPt (int line)               { return m_userBreakPts.find (line) != m_userBreakPts.end (); }
-    vmUserBreakPt& GetUserBreakPt (int line)    { assert (IsUserBreakPt (line)); return m_userBreakPts [line]; }
-    void SetUserBreakPt (int line, vmUserBreakPt& bp) {
-        PatchOut ();
-        bp.m_offset = CalcBreakPtOffset (line);
-        m_userBreakPts [line] = bp;
-    }
-    void ClearUserBreakPt (int line) {
-        PatchOut ();
-        m_userBreakPts.erase (m_userBreakPts.find (line));
-    }
-    void ClearUserBreakPts () {
-        PatchOut ();
-        m_userBreakPts.clear ();
-    }
+
     void ClearTempBreakPts () {
         PatchOut ();
         m_tempBreakPts.clear ();
@@ -192,24 +243,41 @@ public:
         if (!m_breakPtsPatched)
             InternalPatchIn ();
     }
+    void RepatchBreakpts() {
+        PatchOut();
+        PatchIn();
+    }
     void AddStepBreakPts (bool stepInto);               // Add temporary breakpoints to catch execution after stepping over the current line
     bool AddStepOutBreakPt ();                          // Add breakpoint to step out of gosub
-    std::vector<unsigned int>& CallStack () { return m_callStack; }
     vmState GetState ();
     void SetState (vmState& state);
     void GotoInstruction (unsigned int offset) {
-        assert (offset < InstructionCount ());
+        assert(OffsetValid(offset));
         m_ip = offset;
     }
+    bool SkipInstruction() {                            // USE WITH CARE!!!
+        if (m_ip < InstructionCount() + 1) {
+            m_ip++;
+            return true;
+        }
+        else
+            return false;
+    }
     std::string RegToString (vmValType& type);
+    bool OffsetValid(int offset) {
+        return offset >= 0 && (unsigned)offset < InstructionCount();
+    }
+    bool IPValid() {
+        return OffsetValid(m_ip);
+    }
 
     // Building raw VM instructions
     unsigned int InstructionCount ()        { return m_code.size (); }
     void AddInstruction (vmInstruction i)   { PatchOut (); m_code.push_back (i); }
     void RollbackProgram (int size) {
         assert (size >= 0);
-        assert (size <= InstructionCount());
-        while (size < InstructionCount ())
+        assert ((unsigned)size <= InstructionCount());
+        while ((unsigned)size < InstructionCount ())
             m_code.pop_back ();
     }
     vmInstruction& Instruction (unsigned int index)  {
@@ -259,9 +327,13 @@ public:
         assert (index <= m_stack.Size ());
         return m_stack [m_stack.Size () - index];
     }
-    vmInt GetIntParam (int index)               { return GetParam (index).IntVal ();  }
-    vmReal GetRealParam (int index)             { return GetParam (index).RealVal (); }
-    std::string& GetStringParam (int index)     { return m_strings.Value (GetIntParam (index)); }
+    vmInt GetIntParam (int index)                   { return GetParam (index).IntVal ();  }
+    vmReal GetRealParam (int index)                 { return GetParam (index).RealVal (); }
+    std::string& GetStringParam (int index)         { return m_strings.Value (GetIntParam (index)); }
+    std::string& GetString(int index)               { return m_strings.Value(index); }
+    int AllocString()                               { return m_strings.Alloc(); }
+    int StoredStrings()                             { return m_strings.StoredElements(); }
+    vmStore<vmString>& Strings()                    { return m_strings; }
 
     // Reference params (called by external functions)
     bool CheckNullRefParam (int index) {
@@ -297,11 +369,30 @@ public:
     std::string BasicValToString (vmValue val, vmBasicValType type, bool constant);
     std::string ValToString (vmValue val, vmValType type, int& maxChars);
     std::string VarToString (vmVariable& v, int maxChars);
+    std::string DataToString(int dataIndex, vmValType type, int maxChars);
+
+    // User functions
+    vmUserFunc& AddUserFunction(int& index);
+
+
+    // Rollback after compile error
+    vmRollbackPoint GetRollbackPoint();
+    void Rollback(vmRollbackPoint rollbackPoint);
+
+    // Codeblock access
+    bool IsCodeBlockValid(int index);
+    int GetCodeBlockOffset(int index);
+
+    // Builtin/plugin function callback support
+    bool IsEndCallback() {
+        assert(IPValid());
+        return m_code [m_ip].m_opCode == OP_END_CALLBACK;        // Reached end callback opcode?
+    }
 
     // Streaming
 #ifdef VM_STATE_STREAMING
-    void StreamOut (std::ostream& stream);
-    void StreamIn (std::istream& stream);
+    void StreamOut(std::ostream& stream);
+    bool StreamIn(std::istream& stream);
 #endif
 };
 
